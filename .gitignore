@@ -1,0 +1,57 @@
+# ============================================================
+#  Genie .gitignore
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+*.dll
+.eggs/
+.venv/
+venv/
+env/
+.env            # NEVER commit real env files
+*.env
+
+# --- ML model cache (faster-whisper downloads models here) ---
+~/.cache/huggingface/
+model_cache/
+
+# --- Node / npm ---
+node_modules/
+frontend/dist/
+frontend/release/
+frontend/.vite/
+.npm
+
+# --- Electron build output ---
+*.AppImage
+*.dmg
+*.exe
+*.deb
+*.rpm
+*.snap
+release/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editors ---
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
+logs/

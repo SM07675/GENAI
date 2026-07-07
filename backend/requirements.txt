@@ -1,0 +1,32 @@
+# --- Core server ---------------------------------------------------------
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+websockets==13.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+python-multipart==0.0.17
+
+# --- AI / LLM client (OpenAI-compatible -> GLM 5.2) ----------------------
+openai==1.55.0
+httpx==0.27.2
+
+# --- Speech --------------------------------------------------------------
+faster-whisper==1.0.3          # local STT (default engine)
+edge-tts==6.1.18               # default TTS, no API key needed
+# ElevenLabs TTS uses the `openai`/`httpx` clients already listed; no extra dep.
+
+# --- OS automation tools -------------------------------------------------
+pyautogui==0.9.54              # ghost typing / mouse control
+psutil==6.1.0                  # process discovery + force-close
+pycaw==20240210                # Windows core audio (volume control)
+comtypes==1.4.8                # COM bindings required by pycaw
+pygetwindow==0.0.9             # focus windows before ghost-typing
+mss==9.0.2                     # fast screenshots
+Pillow==11.0.0                 # image encode/resize for vision
+
+# --- Tunneling (mobile access) ------------------------------------------
+pyngrok==7.2.2
+
+# --- Utilities -----------------------------------------------------------
+loguru==0.7.2
