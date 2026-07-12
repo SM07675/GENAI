@@ -1,0 +1,12 @@
+[
+  {
+    "_comment": "Add your contacts here. Remove this _comment field in production.",
+    "name": "Example Contact",
+    "aliases": ["example", "ec"],
+    "phone": "919876543210",
+    "whatsapp": "919876543210",
+    "instagram": "example_insta_username",
+    "email": "example@email.com",
+    "telegram": "examplehandle"
+  }
+]

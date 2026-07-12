@@ -4,14 +4,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore } from "../store/appStore";
 
-export function useAudioRecorder({ onChunk, sampleMs = 100 } = {}) {
+export function useAudioRecorder({ onChunk, sampleMs = 100, autoEndOnSilence = false, silenceThreshold = 500 } = {}) {
   const [recording, setRecording] = useState(false);
   const setAmplitude = useAppStore((s) => s.setAmplitude);  // publish to store for the orb
   const mediaRef = useRef(null);                   // MediaRecorder
   const streamRef = useRef(null);                  // MediaStream
   const analyserRef = useRef(null);                // AnalyserNode
   const rafRef = useRef(null);                     // animation frame id
+  const silenceTimerRef = useRef(null);            // silence detection timer
   const onChunkRef = useRef(onChunk);
+  const onSilenceEndRef = useRef(null);            // callback for silence end
   onChunkRef.current = onChunk;
 
   // Poll the analyser for amplitude (drives the orb's wave ring).
@@ -27,10 +29,29 @@ export function useAudioRecorder({ onChunk, sampleMs = 100 } = {}) {
         sum += v * v;
       }
       const rms = Math.sqrt(sum / data.length);
-      setAmplitude(Math.min(1, rms * 3));
+      const normalizedAmp = Math.min(1, rms * 3);
+      setAmplitude(normalizedAmp);
+
+      // Silence detection for auto-end
+      if (autoEndOnSilence && normalizedAmp < 0.02) { // Very low amplitude = silence
+        if (!silenceTimerRef.current) {
+          silenceTimerRef.current = setTimeout(() => {
+            if (onSilenceEndRef.current) {
+              console.log("Silence detected - auto-ending recording");
+              onSilenceEndRef.current();
+            }
+          }, silenceThreshold);
+        }
+      } else {
+        // Clear silence timer on sound
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+        }
+      }
     }
     rafRef.current = requestAnimationFrame(tick);
-  }, []);
+  }, [autoEndOnSilence, silenceThreshold]);
 
   const start = useCallback(async () => {
     if (mediaRef.current) return;
@@ -74,13 +95,22 @@ export function useAudioRecorder({ onChunk, sampleMs = 100 } = {}) {
     analyserRef.current = null;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
     setRecording(false);
     setAmplitude(0);
   }, []);
 
   useEffect(() => () => stop(), [stop]);
 
-  return { recording, start, stop };
+  return { 
+    recording, 
+    start, 
+    stop,
+    setOnSilenceEnd: (callback) => { onSilenceEndRef.current = callback; },
+  };
 }
 
 function pickMime() {

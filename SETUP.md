@@ -15,11 +15,14 @@ Follow these steps in order. The whole setup takes about 5–10 minutes on a nor
 
 ---
 
-## Step 1 — Get your API key
+## Step 1 — Get your API keys
 
 1. Go to [Google AI Studio](https://aistudio.google.com/) → sign in → **Get API key** → create and copy your key.
-2. Optionally get a **free ngrok authtoken** from [dashboard.ngrok.com](https://dashboard.ngrok.com/get-started/your-authtoken) (stable tunnels for mobile).
-3. Optionally get an **ElevenLabs API key** from [elevenlabs.io](https://elevenlabs.io) (higher-quality voice).
+2. Optionally get a **YouTube Data API key** from Google Cloud Console. Genie uses it for official YouTube Music metadata, then opens playback on `music.youtube.com`.
+3. Optionally set up **Google Custom Search JSON API** plus a Programmable Search Engine CX ID for official web search.
+4. Optionally get **NewsAPI**, **GNews**, and/or **TheNewsAPI** keys for official news providers. Genie falls back to RSS/DuckDuckGo if you leave these blank.
+5. Optionally get a **free ngrok authtoken** from [dashboard.ngrok.com](https://dashboard.ngrok.com/get-started/your-authtoken) (stable tunnels for mobile).
+6. Optionally get an **ElevenLabs API key** from [elevenlabs.io](https://elevenlabs.io) (higher-quality voice).
 
 ---
 
@@ -39,6 +42,18 @@ GEMINI_MODEL=gemini-2.5-flash
 
 # Optional but strongly recommended:
 NGROK_AUTHTOKEN=your-ngrok-token-here
+
+# Optional official APIs:
+YOUTUBE_DATA_API_KEY=your-youtube-data-api-key
+GOOGLE_CSE_API_KEY=your-google-cse-key
+GOOGLE_CSE_CX=your-programmable-search-engine-id
+NEWS_API_KEY=your-newsapi-key
+GNEWS_API_KEY=your-gnews-key
+THENEWSAPI_KEY=your-thenewsapi-key
+
+# Optional most natural voice mode:
+# TTS_ENGINE=gemini_live
+# GEMINI_LIVE_VOICE_NAME=Aoede
 
 # Optional – set a fixed PIN instead of auto-generated:
 # GENIE_PIN=1234
@@ -180,10 +195,30 @@ def my_new_tool(param: str) -> ToolResult:
 | `STT_ENGINE` | `faster_whisper` | `faster_whisper` or `whisper_api` |
 | `WHISPER_MODEL_SIZE` | `small` | `tiny/base/small/medium/large-v3` |
 | `STT_DEVICE` | `auto` | `auto/cuda/cpu` |
-| `TTS_ENGINE` | `edge` | `edge` or `elevenlabs` |
+| `TTS_ENGINE` | `edge` | `edge`, `elevenlabs`, or `gemini_live` |
 | `EDGE_VOICE` | `en-US-AriaNeural` | Any Edge TTS voice name |
 | `ELEVENLABS_API_KEY` | *(empty)* | ElevenLabs key (enables ElevenLabs) |
+| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Gemini Live native-audio model used when `TTS_ENGINE=gemini_live` |
+| `GEMINI_LIVE_VOICE_NAME` | `Aoede` | Gemini Live voice name |
+| `GEMINI_LIVE_STYLE` | *(natural voice prompt)* | Spoken style instruction for Gemini Live |
 | `NGROK_ENABLED` | `true` | Set `false` to disable tunnel |
 | `NGROK_AUTHTOKEN` | *(empty)* | ngrok authtoken (recommended) |
+| `YOUTUBE_DATA_API_KEY` | *(empty)* | Official YouTube Data API key for YouTube Music metadata |
+| `YOUTUBE_REGION_CODE` | `IN` | Region used for YouTube search results |
+| `YOUTUBE_MUSIC_PROVIDER` | `auto` | `auto`, `youtube_data`, `ytmusicapi`, or `browser` |
+| `GOOGLE_CSE_API_KEY` | *(empty)* | Google Custom Search JSON API key |
+| `GOOGLE_CSE_CX` | *(empty)* | Google Programmable Search Engine CX ID |
+| `NEWS_API_KEY` | *(empty)* | NewsAPI.org key for official news results |
+| `GNEWS_API_KEY` | *(empty)* | GNews.io key for official news results |
+| `THENEWSAPI_KEY` | *(empty)* | TheNewsAPI.com key for official news results |
+| `SPOTIFY_CLIENT_ID` | *(empty)* | Optional Spotify client ID for future media integrations |
+| `SPOTIFY_CLIENT_SECRET` | *(empty)* | Optional Spotify client secret |
+| `NEWS_DEFAULT_COUNTRY` | `in` | Default 2-letter news country |
+| `NEWS_DEFAULT_LANGUAGE` | `en` | Default 2-letter news language |
+| `API_TIMEOUT_SECONDS` | `10` | External API request timeout |
+| `API_CACHE_TTL_SECONDS` | `300` | In-memory cache time for API responses |
+| `API_RATE_LIMIT_PER_MINUTE` | `45` | Local per-provider rate limit |
+| `API_CIRCUIT_FAILURE_THRESHOLD` | `3` | Failed calls before a provider circuit opens |
+| `API_CIRCUIT_COOLDOWN_SECONDS` | `60` | Seconds before probing a failed provider again |
 | `GENIE_PIN` | *(auto)* | 4-digit PIN; auto-generated if blank |
 | `PORT` | `8765` | Backend listen port |

@@ -3,12 +3,16 @@
 `open_url` is the browser fallback target for the "Instagram problem"
 guardrail — when a native app isn't installed, the orchestrator (per the
 system prompt) chains here instead of failing.
+
+Contacts are resolved via the configurable registry in `contacts.py`
+(data/contacts.json), so no personal names are hardcoded here.
 """
 from __future__ import annotations
 
 import urllib.parse
 import webbrowser
 
+from ..contacts import lookup_contact
 from ..schemas import ToolResult
 from .registry import tool
 
@@ -38,7 +42,7 @@ def open_url(url: str) -> ToolResult:
             message=f"Opening {target}.",
             data={"url": target},
         )
-    except Exception as e:  # noqa: BLE001
+    except OSError as e:
         return ToolResult(status="error", message=f"Couldn't open {target}: {e}")
 
 
@@ -46,14 +50,31 @@ def open_url(url: str) -> ToolResult:
 def open_whatsapp_chat(contact: str | None = None) -> ToolResult:
     """Open WhatsApp Web, optionally jumping straight into a contact's chat using a wa.me deep link. Caller still needs to press Send.
 
-    :param contact: Optional phone number in international format (e.g. 919876543210) or contact name. Numbers deep-link; names just open WhatsApp Web.
+    Accepts a phone number in international format (e.g. 919876543210) or a
+    contact name that matches an entry in your contacts registry
+    (data/contacts.json).
+
+    :param contact: Phone number or contact name/alias from your contacts list.
     """
     try:
-        if contact and contact.strip().isdigit():
-            # wa.me requires full international number, no '+' or spaces.
-            phone = "".join(c for c in contact if c.isdigit())
+        phone: str | None = None
+
+        if contact:
+            contact = contact.strip()
+            # If it's a digit string, use directly.
+            if contact.isdigit():
+                phone = contact
+            else:
+                # Try contacts registry first.
+                entry = lookup_contact(contact)
+                if entry:
+                    phone = entry.get("whatsapp") or entry.get("phone")
+                    if phone:
+                        phone = "".join(c for c in phone if c.isdigit())
+
+        if phone:
             url = f"https://wa.me/{phone}"
-            msg = f"Opening WhatsApp chat with {phone}."
+            msg = f"Opening WhatsApp chat with {contact or phone}."
         else:
             url = "https://web.whatsapp.com"
             extra = f" for {contact}" if contact else ""
@@ -63,7 +84,7 @@ def open_whatsapp_chat(contact: str | None = None) -> ToolResult:
             )
         _open(url)
         return ToolResult(status="ok", message=msg, data={"url": url, "contact": contact})
-    except Exception as e:  # noqa: BLE001
+    except OSError as e:
         return ToolResult(status="error", message=f"Couldn't open WhatsApp: {e}")
 
 
@@ -71,11 +92,25 @@ def open_whatsapp_chat(contact: str | None = None) -> ToolResult:
 def open_instagram_chat(contact: str | None = None) -> ToolResult:
     """Open Instagram, optionally to a user's profile/direct chat. Native app first, web fallback handled by the orchestrator.
 
-    :param contact: Optional Instagram username (without @). Opens their profile/DM thread; you still hit Send.
+    Accepts an Instagram username (without @) or a contact name that matches
+    an entry in your contacts registry (data/contacts.json).
+
+    :param contact: Instagram username or contact name/alias from your contacts list.
     """
     try:
+        username: str | None = None
+
         if contact:
-            username = contact.strip().lstrip("@")
+            contact_str = contact.strip().lstrip("@")
+            # Try contacts registry for a friendly name lookup.
+            entry = lookup_contact(contact_str)
+            if entry and entry.get("instagram"):
+                username = entry["instagram"].lstrip("@")
+            else:
+                # Treat as a direct username.
+                username = contact_str
+
+        if username:
             # Direct thread deep link works in both app and web.
             url = f"https://www.instagram.com/direct/new/?recipient={username}"
             msg = f"Opening Instagram chat with @{username}."
@@ -84,5 +119,5 @@ def open_instagram_chat(contact: str | None = None) -> ToolResult:
             msg = "Opening Instagram Direct inbox."
         _open(url)
         return ToolResult(status="ok", message=msg, data={"url": url, "contact": contact})
-    except Exception as e:  # noqa: BLE001
+    except OSError as e:
         return ToolResult(status="error", message=f"Couldn't open Instagram: {e}")

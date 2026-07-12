@@ -7,11 +7,13 @@ tool set available. We import with `# noqa: F401` because the side effect
 """
 from . import apps        # noqa: F401  (registers open_app, close_app, launch_steam_game)
 from . import web         # noqa: F401  (open_url, open_whatsapp_chat, open_instagram_chat)
-from . import media       # noqa: F401  (play_youtube, play_youtube_playlist)
+from . import media       # noqa: F401  (YouTube and YouTube Music tools)
 from . import system_control  # noqa: F401 (set_volume, trigger_night_light, sleep_pc)
 from . import ghost_type  # noqa: F401  (ghost_type)
 from . import screen_vision  # noqa: F401 (capture_screen)
-from . import memory      # noqa: F401 (manage_note)
+from . import memory      # noqa: F401 (manage_note, set_reminder)
+from . import internet    # noqa: F401 (search_web, get_news, get_news_briefing, get_api_status)
+from . import utilities   # noqa: F401 (get_weather, get_time, calculate, clipboard_read, clipboard_write)
 
 from .registry import REGISTRY as TOOLS, tool, tool_schemas, execute_tool
 

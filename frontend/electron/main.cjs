@@ -19,9 +19,9 @@ function createWindow() {
     minWidth: 360,
     minHeight: 560,
     frame: false,            // frameless for the custom futuristic shell
-    transparent: false,
+    transparent: true,
     resizable: true,
-    backgroundColor: "#222222",
+    backgroundColor: "#00000000",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

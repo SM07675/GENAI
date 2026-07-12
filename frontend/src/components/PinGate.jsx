@@ -54,7 +54,7 @@ export default function PinGate({ onSubmit }) {
         <p className="text-sm text-gray-400 mt-1">Enter the PIN shown on your PC</p>
       </div>
 
-      <div className="flex gap-3" onPaste={onPaste}>
+      <div className="flex gap-3" onPaste={onPaste} style={{ WebkitAppRegion: "no-drag" }}>
         {pin.map((d, i) => (
           <input
             key={i}

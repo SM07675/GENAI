@@ -11,11 +11,24 @@ const FRIENDLY_TOOL_NAMES = {
   open_instagram_chat: "Opened Instagram",
   play_youtube: "Playing",
   play_youtube_playlist: "Playing playlist",
+  search_youtube_music: "YouTube Music",
+  play_youtube_music: "Playing music",
   set_volume: "Set volume",
   trigger_night_light: "Night light",
   sleep_pc: "Sleeping PC",
   ghost_type: "Typed",
   capture_screen: "Looking at screen",
+  manage_note: "Memory",
+  set_reminder: "Reminder",
+  search_web: "Searched web",
+  get_news: "News",
+  get_news_briefing: "News briefing",
+  get_api_status: "API status",
+  get_weather: "Weather",
+  get_time: "Time",
+  calculate: "Calculated",
+  clipboard_read: "Read clipboard",
+  clipboard_write: "Copied",
 };
 
 export default function MessageBubble({ message }) {
@@ -29,14 +42,11 @@ export default function MessageBubble({ message }) {
       animate={{ opacity: 1, y: 0 }}
       className={`flex ${isUser ? "justify-end" : "justify-start"}`}
     >
-      <div
-        className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed
-          ${isUser
-            ? "bg-gradient-to-br from-neon-blue/30 to-neon-violet/30 border border-neon-violet/40 rounded-br-sm"
-            : isError
-              ? "bg-neon-pink/15 border border-neon-pink/40 rounded-bl-sm"
-              : "glass rounded-bl-sm"}`}
-      >
+      <div className={`max-w-[80%] neon-border-wrapper ${isUser ? 'cyber-panel-inv' : 'cyber-panel'}`}>
+        <div
+          className={`neon-border-content px-4 py-2.5 text-sm leading-relaxed
+            ${isUser ? 'cyber-panel-inv bg-[#081525]' : 'cyber-panel bg-[#150825]'}`}
+        >
         {/* Inline tool chips for assistant messages */}
         {!isUser && message.toolEvents?.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-1.5">
@@ -45,9 +55,10 @@ export default function MessageBubble({ message }) {
             ))}
           </div>
         )}
-        <p className={isUser ? "text-white" : isError ? "text-neon-pink" : "text-gray-100"}>
+        <p className={`break-words whitespace-pre-wrap ${isUser ? "text-neon-cyan" : isError ? "text-neon-pink" : "text-gray-100"}`}>
           {message.text || (isUser ? "" : "…")}
         </p>
+        </div>
       </div>
     </motion.div>
   );

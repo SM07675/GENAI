@@ -7,9 +7,14 @@ pydantic-settings==2.6.1
 python-dotenv==1.0.1
 python-multipart==0.0.17
 
-# --- AI / LLM client (OpenAI-compatible -> GLM 5.2) ----------------------
+# --- AI / LLM client (OpenAI-compatible -> Gemini) -----------------------
 openai==1.55.0
 httpx==0.27.2
+google-genai==1.10.0
+
+# --- Reliability & Observability -----------------------------------------
+tenacity==9.0.0            # retry + exponential backoff with jitter
+structlog==24.4.0          # structured JSON logging with bound context
 
 # --- Speech --------------------------------------------------------------
 faster-whisper==1.0.3          # local STT (default engine)
@@ -24,9 +29,34 @@ comtypes==1.4.8                # COM bindings required by pycaw
 pygetwindow==0.0.9             # focus windows before ghost-typing
 mss==9.0.2                     # fast screenshots
 Pillow==11.0.0                 # image encode/resize for vision
+pyperclip==1.9.0               # clipboard read/write
 
 # --- Tunneling (mobile access) ------------------------------------------
 pyngrok==7.2.2
 
 # --- Utilities -----------------------------------------------------------
 loguru==0.7.2
+requests==2.32.3
+ddgs==0.3.0
+ytmusicapi==1.8.2
+
+# --- Security (Phase 2) --------------------------------------------------
+# python-jose[cryptography]==3.3.0   # JWT tokens (uncomment for Phase 2)
+# passlib[bcrypt]==1.7.4             # password hashing (uncomment for Phase 2)
+# aiosqlite==0.20.0                  # async SQLite for user store (uncomment for Phase 2)
+# keyring==25.4.1                    # OS keychain for master key (uncomment for Phase 2)
+
+# --- Optional: Wake word detection (hands-free activation) ---------------
+# Uncomment the engine you want to use:
+# pvporcupine==3.0.2         # Porcupine (high accuracy, requires API key)
+# vosk==0.3.45               # Vosk (offline, free)
+# pyaudio==0.2.14            # Required for wake word audio capture
+# numpy>=1.24.0              # Required for simple wake word detection
+
+# --- Dev / CI tools (install separately: pip install -r requirements-dev.txt) ---
+# ruff==0.6.9
+# mypy==1.13.0
+# pytest==8.3.3
+# pytest-asyncio==0.24.0
+# httpx==0.27.2              # already above; needed for TestClient
+# pip-audit==2.7.3

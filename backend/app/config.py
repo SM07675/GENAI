@@ -33,8 +33,18 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""             # required at runtime; checked in main
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     gemini_model: str = "gemini-2.5-flash"
-    gemini_temperature: float = 0.6
-    gemini_max_tokens: int = 4096
+    gemini_temperature: float = 0.4    # lower = more accurate, less hallucination
+    gemini_max_tokens: int = 8192      # higher = complete answers, no truncation
+
+    # --- Offline LLM fallback --------------------------------------------
+    local_llm_enabled: bool = True
+    local_llm_model_path: str = ""          # blank = auto-scan data/models/*.gguf
+    local_llm_legacy_site_packages: str = r"D:\GenieAI\backend\.venv\Lib\site-packages"
+    local_llm_n_ctx: int = 4096
+    local_llm_max_tokens: int = 700
+    local_llm_temperature: float = 0.55
+    local_llm_top_p: float = 0.9
+    local_llm_n_gpu_layers: int = 0         # CPU-safe default; set -1 for GPU build
 
     # --- Speech-to-text (faster-whisper, local by default) ----------------
     stt_engine: str = "faster_whisper"     # or "whisper_api"
@@ -45,17 +55,44 @@ class Settings(BaseSettings):
     openai_api_key: str = ""               # only if stt_engine == "whisper_api"
 
     # --- Text-to-speech ---------------------------------------------------
-    tts_engine: str = "edge"               # "edge" (default) or "elevenlabs"
+    tts_engine: str = "elevenlabs"         # "edge", "elevenlabs", or "gemini_live"
     edge_voice: str = "en-US-AriaNeural"   # female, expressive
     elevenlabs_api_key: str = ""
-    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    elevenlabs_voice_id: str = "Xb7hH8MSUJpSbSDYk0k2"
     elevenlabs_model: str = "eleven_multilingual_v2"
     tts_sample_rate: int = 24000
+    gemini_live_model: str = "gemini-3.1-flash-live-preview"
+    gemini_live_voice_name: str = "Aoede"
+    gemini_live_style: str = (
+        "Speak naturally, warmly, and briefly. Use human pacing, small pauses, "
+        "and the same language as the text. Do not add extra content."
+    )
 
     # --- Ngrok / mobile tunnel -------------------------------------------
     ngrok_enabled: bool = True
     ngrok_authtoken: str = ""              # recommended for stable tunnels
     ngrok_region: str = ""                 # "" = auto; e.g. "us", "eu", "ap"
+
+    # --- External APIs ----------------------------------------------------
+    # YouTube Music has no official public API; we use YouTube Data API for
+    # official search metadata and optionally ytmusicapi for richer metadata.
+    youtube_data_api_key: str = ""
+    youtube_region_code: str = "IN"
+    youtube_music_provider: str = "auto"      # auto|youtube_data|ytmusicapi|browser
+    news_api_key: str = ""                 # NewsAPI.org
+    gnews_api_key: str = ""                # GNews.io
+    thenewsapi_key: str = ""               # TheNewsAPI.com
+    google_cse_api_key: str = ""           # Google Custom Search JSON API
+    google_cse_cx: str = ""                # Programmable Search Engine ID
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
+    news_default_country: str = "in"
+    news_default_language: str = "en"
+    api_timeout_seconds: int = 10
+    api_cache_ttl_seconds: int = 300
+    api_rate_limit_per_minute: int = 45
+    api_circuit_failure_threshold: int = 3
+    api_circuit_cooldown_seconds: int = 60
 
     # --- Security: 4-digit PIN -------------------------------------------
     # If not provided, a fresh one is generated at startup and printed/logged.
@@ -63,6 +100,11 @@ class Settings(BaseSettings):
 
     # --- Session tokens ---------------------------------------------------
     session_token_ttl_seconds: int = 60 * 60 * 12  # 12h per authenticated WS
+
+    # --- Wake word detection (optional, hands-free activation) -----------
+    wake_word_enabled: bool = False        # set to True to enable
+    wake_word_engine: str = "simple"       # "porcupine", "vosk", or "simple"
+    wake_word_keywords: list[str] = ["hey genie", "okay genie", "hi genie", "genie"]
 
     @property
     def effective_pin(self) -> str:
