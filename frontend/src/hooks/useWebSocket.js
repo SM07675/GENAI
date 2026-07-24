@@ -15,6 +15,28 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useAppStore, ORB_STATES } from "../store/appStore";
 
+// #region debug-point B:frontend-websocket
+const DEBUG_SERVER_URL = "http://127.0.0.1:7777/event";
+const DEBUG_SESSION_ID = "genie-voice-loop";
+
+function reportWsDebug(hypothesisId, location, msg, data = {}) {
+  // Disabled: The debug telemetry server is no longer running.
+  // fetch(DEBUG_SERVER_URL, {
+  //   method: "POST",
+  //   headers: { "Content-Type": "application/json" },
+  //   body: JSON.stringify({
+  //     sessionId: DEBUG_SESSION_ID,
+  //     runId: "pre-fix",
+  //     hypothesisId,
+  //     location,
+  //     msg: `[DEBUG] ${msg}`,
+  //     data,
+  //     ts: Date.now(),
+  //   }),
+  // }).catch(() => {});
+}
+// #endregion
+
 const HEARTBEAT_INTERVAL_MS = 30_000;   // send ping every 30 s
 const HEARTBEAT_TIMEOUT_MS  = 10_000;   // wait 10 s for pong before reconnecting
 const MAX_BACKOFF_MS        = 30_000;   // cap reconnect delay at 30 s
@@ -30,7 +52,7 @@ function resolveWsUrl() {
   return `${wsProto}://${window.location.host}/ws`;
 }
 
-export function useWebSocket(pin) {
+export function useWebSocket(pin, queueAudioChunk, stopAudio, notifyTtsDone) {
   const wsRef            = useRef(null);
   const reconnectRef     = useRef(0);      // consecutive reconnect attempts
   const shouldRun        = useRef(false);
@@ -49,6 +71,10 @@ export function useWebSocket(pin) {
     clearActiveTools,
     pushUserMessage,
     pushAssistantError,
+    setIsTTSPlaying,
+    setVoiceState,
+    setLiveTranscript,
+    forceGenieState,
   } = useAppStore();
 
   // ── Heartbeat helpers ─────────────────────────────────────────────────────
@@ -92,11 +118,145 @@ export function useWebSocket(pin) {
           break;
         case "orb_state":
           setOrbState(msg.state);
-          if (msg.state === ORB_STATES.IDLE) clearActiveTools();
+          if (msg.state === ORB_STATES.IDLE) {
+            clearActiveTools();
+          }
           break;
-        case "wake_word_detected":
-          useAppStore.setState({ shouldAutoRecord: true });
+
+        // ── New pipeline: engine_state (authoritative state from VoicePipeline) ──
+        case "engine_state": {
+          const engineStateMap = {
+            "idle":                "idle",
+            "wait_wake":           "sleeping",
+            "listening":           "listening",
+            "understanding":       "transcribing",
+            "thinking":            "thinking",
+            "streaming_response":  "speaking",
+            "speaking":            "speaking",
+            "return_to_listening": "follow_up_listening",
+          };
+          const mapped = engineStateMap[msg.state] || "idle";
+          forceGenieState(mapped);
+
+          // Also update voiceState for mic button compatibility
+          const voiceMap = {
+            "idle":                "idle",
+            "wait_wake":           "wake_listening",
+            "listening":           "active_listening",
+            "understanding":       "transcribing",
+            "thinking":            "processing",
+            "streaming_response":  "speaking",
+            "speaking":            "speaking",
+            "return_to_listening": "follow_up_listening",
+          };
+          setVoiceState(voiceMap[msg.state] || "idle");
+
+          // SAFETY NET: When pipeline transitions back to listening/idle states,
+          // force-clear isTTSPlaying so the mic isn't permanently muted.
+          // This prevents the "dead after speaking" bug where TTS flag stays stuck.
+          if (["wait_wake", "listening", "return_to_listening", "idle"].includes(msg.state)) {
+            setIsTTSPlaying(false);
+          }
+
+          // Update live transcript based on state
+          switch (msg.state) {
+            case "wait_wake":
+              setLiveTranscript("");
+              break;
+            case "listening":
+            case "return_to_listening":
+              setLiveTranscript("Listening...");
+              break;
+            case "understanding":
+              setLiveTranscript("Processing speech...");
+              break;
+            case "thinking":
+              setLiveTranscript("Thinking...");
+              break;
+            case "speaking":
+            case "streaming_response":
+              // Don't clear — keep showing assistant text
+              break;
+            default:
+              break;
+          }
           break;
+        }
+
+        // ── New pipeline: user transcript from STT ──
+        case "user_text": {
+          const userText = msg.text || "";
+          if (userText) {
+            pushUserMessage(userText);
+            setLiveTranscript(userText);
+          }
+          break;
+        }
+
+        // ── New pipeline: stop_audio (barge-in) ──
+        case "stop_audio": {
+          console.log("[WS] stop_audio received — stopping playback");
+          if (stopAudio) stopAudio();
+          setIsTTSPlaying(false);
+          break;
+        }
+
+        case "wake_word_detected": {
+          // Backend Vosk detected wake word.
+          const currentVS = useAppStore.getState().voiceState;
+          const currentTTS = useAppStore.getState().isTTSPlaying;
+          const allowedStates = ["idle", "wake_listening", "speaking"];
+          if (allowedStates.includes(currentVS) || currentTTS) {
+            console.log("[WS] wake_word_detected -> wake_detected (Barge-in allowed)");
+            if (currentTTS && stopAudio) {
+               stopAudio();
+            }
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: "cancel" }));
+            }
+          } else {
+            console.log(`[WS] wake_word_detected ignored - state=${currentVS}`);
+          }
+          break;
+        }
+        case "voice_state": {
+          // Backend voice controller state update - authoritative
+          const backendState = msg.state;
+          console.log(`[WS] Backend voice state: ${backendState}`);
+          reportWsDebug("B", "useWebSocket.js:voice_state", "backend voice state received", {
+            backendState,
+          });
+          setVoiceState(backendState);
+          
+          // L6 fix: route through setGenieState with transition validation
+          // instead of raw setState that bypasses the state machine
+          const genieStateMap = {
+            "idle": "idle",
+            "wake_listening": "sleeping",
+            "wake_detected": "waking",
+            "active_listening": "listening",
+            "speech_detected": "listening",
+            "recording": "listening",
+            "transcribing": "transcribing",
+            "processing": "thinking",
+            "speaking": "speaking",
+            "follow_up_listening": "follow_up_listening",
+            "recovering": "idle",
+            "interrupted": "interrupted",
+            "error": "error",
+          };
+          const mappedGenieState = genieStateMap[backendState] || "idle";
+          // Use force because backend is authoritative — always accept
+          useAppStore.getState().forceGenieState(mappedGenieState);
+          break;
+        }
+        case "interrupt": {
+          // Backend requests immediate audio stop (barge-in)
+          console.log("[WS] interrupt received — stopping audio");
+          if (stopAudio) stopAudio();
+          setIsTTSPlaying(false);
+          break;
+        }
         case "transcript":
           pushUserMessage(msg.text);
           break;
@@ -106,6 +266,10 @@ export function useWebSocket(pin) {
               beginAssistantMessage();
             }
             appendAssistantDelta(msg.delta);
+            // Show what Genie is saying in the live transcript
+            setLiveTranscript((useAppStore.getState().messages.find(
+              m => m.id === useAppStore.getState().currentAssistantId
+            )?.text || "").slice(-200));
           }
           if (msg.final) endAssistantMessage();
           break;
@@ -118,6 +282,47 @@ export function useWebSocket(pin) {
           break;
         case "error":
           pushAssistantError(`⚠️ ${msg.message}`);
+          // Also clear isTTSPlaying on error so voice pipeline doesn't stay stuck
+          setIsTTSPlaying(false);
+          // Don't setVoiceState directly - let backend send voice_state event
+          break;
+        case "system_note":
+          // Provider-switch / offline-mode notices from the backend.
+          // Show as a subtle status hint in the store (not in the chat stream).
+          console.info("[WS] system_note:", msg.message);
+          useAppStore.setState({ systemNote: msg.message });
+          // Auto-clear after 6 seconds
+          setTimeout(() => useAppStore.setState({ systemNote: null }), 6000);
+          break;
+        case "assistant_audio_chunk":
+          reportWsDebug("E", "useWebSocket.js:assistant_audio_chunk", "assistant audio chunk received", {
+            mime: msg.mime,
+            seq: msg.seq,
+            audioLen: msg.audio?.length ?? 0,
+          });
+          if (queueAudioChunk) queueAudioChunk(msg.audio, msg.mime, msg.seq);
+          break;
+        case "tts_playing":
+          // Backend started sending audio — mute mic to prevent echo
+          console.log("[WS] TTS playing — muting mic");
+          setIsTTSPlaying(true);
+          // Don't setVoiceState directly - backend will send voice_state event
+          break;
+        case "tts_done":
+          // Delegate to the audio player which knows whether audio is still draining.
+          // notifyTtsDone() sends playback_complete immediately if queue is empty,
+          // or sets a flag so the onended handler sends it after the last chunk.
+          console.log("[WS] tts_done received — delegating to audio player");
+          if (notifyTtsDone) {
+            notifyTtsDone();
+          } else {
+            // Fallback: no audio player — complete immediately
+            setIsTTSPlaying(false);
+            const ws = useAppStore.getState().ws;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "playback_complete" }));
+            }
+          }
           break;
         case "rate_limited":
           pushAssistantError(
@@ -155,19 +360,10 @@ export function useWebSocket(pin) {
           break;
       }
     },
-    [
-      setWsStatus,
-      setPublicUrl,
-      setOrbState,
-      beginAssistantMessage,
-      appendAssistantDelta,
-      endAssistantMessage,
-      addToolEvent,
-      clearActiveTools,
-      pushUserMessage,
-      pushAssistantError,
-      handlePong,
-    ],
+    // M7 fix: Zustand store functions are stable references — only
+    // include truly external deps to prevent unnecessary reconnections
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [handlePong, queueAudioChunk, stopAudio, notifyTtsDone],
   );
 
   // ── connect ───────────────────────────────────────────────────────────────
@@ -187,6 +383,9 @@ export function useWebSocket(pin) {
     ws.onopen = () => {
       setWsStatus("connected");
       reconnectRef.current = 0;
+      reportWsDebug("B", "useWebSocket.js:onopen", "websocket opened", {
+        attempt,
+      });
       ws.send(JSON.stringify({ type: "hello", pin }));
 
       // Start heartbeat loop.
@@ -206,8 +405,14 @@ export function useWebSocket(pin) {
     ws.onmessage = handleMessage;
 
     ws.onclose = () => {
+      // M8 fix: ignore onclose for stale sockets (e.g. from Strict Mode unmounts)
+      if (wsRef.current !== ws) return;
+
       stopHeartbeat();
       setWsStatus("disconnected");
+      reportWsDebug("B", "useWebSocket.js:onclose", "websocket closed", {
+        reconnectAttempt: reconnectRef.current,
+      });
       wsRef.current = null;
       if (shouldRun.current && pin) {
         const delay = Math.min(MAX_BACKOFF_MS, 500 * 2 ** reconnectRef.current++);
@@ -216,7 +421,9 @@ export function useWebSocket(pin) {
     };
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return;
       setWsStatus("error");
+      reportWsDebug("B", "useWebSocket.js:onerror", "websocket error", {});
     };
 
     setWs(ws);

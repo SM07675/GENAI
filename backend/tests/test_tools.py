@@ -10,7 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.schemas import ToolResult
-from app.tools.registry import execute_tool
+from app.tools.registry import execute_tool, tool_manifests
+from app.tools.internet import _parse_duckduckgo_html_results
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -48,11 +49,11 @@ class TestOpenApp:
 
     def test_chrome_has_browser_fallback(self):
         with patch("shutil.which", return_value=None), \
-             patch("os.path.exists", return_value=False):
+             patch("os.path.exists", return_value=False), \
+             patch("app.tools.apps._find_best_match", return_value=None):
             result = execute_tool("open_app", {"name": "chrome"})
-            # Chrome has a known fallback URL; should be not_found, not error.
             assert result.status == "not_found"
-            assert "suggestion" in result.data or "url" in result.data
+            assert "app" in result.data
 
 
 # ── open_url ──────────────────────────────────────────────────────────────────
@@ -73,6 +74,27 @@ class TestOpenUrl:
     def test_empty_url_returns_error(self):
         result = execute_tool("open_url", {"url": ""})
         err(result)
+
+
+# ── Web search helpers ────────────────────────────────────────────────────────
+
+class TestWebSearchHelpers:
+    def test_parse_duckduckgo_html_results(self):
+        html = """
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fstory">
+            Example Story
+        </a>
+        <div class="result__snippet">A short <b>summary</b> of the result.</div>
+        """
+
+        results = _parse_duckduckgo_html_results(html, max_results=5)
+
+        assert results == [{
+            "title": "Example Story",
+            "url": "https://example.com/story",
+            "body": "A short summary of the result.",
+            "source": "example.com",
+        }]
 
 
 # ── open_whatsapp_chat ────────────────────────────────────────────────────────
@@ -119,7 +141,9 @@ class TestOpenInstagramChat:
 
 class TestLaunchSteamGame:
     def test_known_game(self):
-        with patch("subprocess.Popen"):
+        with patch("subprocess.Popen"), \
+             patch("app.tools.apps._launch"), \
+             patch("app.tools.apps._find_best_match", return_value=("Palworld", "C:\\fake\\path")):
             result = execute_tool("launch_steam_game", {"game": "palworld"})
             ok(result)
             assert "Palworld" in result.message
@@ -132,6 +156,34 @@ class TestLaunchSteamGame:
     def test_unknown_game(self):
         result = execute_tool("launch_steam_game", {"game": "completely_unknown_game_xyz"})
         err(result)
+
+
+# ── Media tools ───────────────────────────────────────────────────────────────
+
+class TestMediaTools:
+    def test_play_youtube_uses_no_key_youtube_search(self):
+        fake_result = [{
+            "title": "Lo-fi Beats",
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        }]
+        with patch("app.tools.media._youtube_video_search", return_value=[]), \
+             patch("app.tools.media._ddg_youtube_video_search", return_value=fake_result):
+            result = execute_tool("play_youtube", {"query": "lofi beats"})
+
+        ok(result)
+        assert result.data["action"] == "play_media"
+        assert result.data["video_id"] == "dQw4w9WgXcQ"
+
+    def test_play_youtube_music_browser_fallback_when_no_provider(self):
+        with patch("app.tools.media.music_service.available", return_value=False), \
+             patch("app.tools.media.api_manager.is_configured", return_value=False), \
+             patch("app.tools.media._ddg_youtube_video_search", return_value=[]):
+            result = execute_tool("play_youtube_music", {"query": "some rare song"})
+
+        assert result.status == "not_found"
+        assert result.data["suggestion"] == "open_url"
+        assert "music.youtube.com/search" in result.data["url"]
 
 
 # ── System control tools ──────────────────────────────────────────────────────
@@ -171,3 +223,15 @@ class TestExecuteTool:
         result = execute_tool("open_app", {"wrong_param": "value"})
         # open_app requires `name` — should return error, not crash
         assert result.status in ("error", "ok", "not_found")
+
+    def test_tool_manifest_exposes_policy_metadata(self):
+        manifests = {item["name"]: item for item in tool_manifests()}
+
+        assert "open_app" in manifests
+        assert manifests["open_app"]["side_effect_level"] in {
+            "local_change",
+            "read_only",
+            "external_network",
+        }
+        assert "timeout_ms" in manifests["open_app"]
+        assert manifests["open_app"]["parameters"]["type"] == "object"

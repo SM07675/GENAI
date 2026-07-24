@@ -61,12 +61,17 @@ class APIManager:
         "api.thenewsapi.com",
         "news.google.com",
         "duckduckgo.com",
+        "html.duckduckgo.com",
         "api.duckduckgo.com",
+        "links.duckduckgo.com",
         "music.youtube.com",
         "www.youtube.com",
         "youtube.com",
         "accounts.spotify.com",
         "api.spotify.com",
+        "api.elevenlabs.io",
+        "api.openweathermap.org",
+        "wttr.in",
     }
 
     def __init__(self) -> None:

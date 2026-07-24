@@ -29,12 +29,63 @@ class Settings(BaseSettings):
     port: int = 8765                  # FastAPI / WS port
     cors_origins: list[str] = ["*"]   # tightened in prod
 
+    # --- Main LLM Provider ------------------------------------------------
+    llm_provider: str = "nvidia"         # "nvidia" (default), "openrouter", "gemini", "grok"/"xai", or "groq"
+
+    # --- OpenRouter (OpenAI-compatible, access to 100s of models) ---------
+    # Get a free key from https://openrouter.ai/keys
+    # Free tier: many models at $0/token (e.g. deepseek, qwen, mistral, llama)
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    
+    # Model fallback pool
+    openrouter_primary_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    openrouter_fallback_models: list[str] = ["qwen/qwen-2.5-72b-instruct:free", "google/gemini-2.0-flash-exp:free"]
+    
+    # Rate limiting and cooldowns
+    openrouter_rpm: int = 5
+    openrouter_max_retries_per_model: int = 1
+    openrouter_cooldown_seconds: int = 120
+    
+    openrouter_temperature: float = 0.4
+    openrouter_max_tokens: int = 8192
+    openrouter_timeout_seconds: float = 25.0
+    openrouter_site_url: str = "http://localhost:8765"
+    openrouter_site_name: str = "Genie AI Assistant"
+
     # --- Gemini (OpenAI-compatible endpoint) -----------------------------
-    gemini_api_key: str = ""             # required at runtime; checked in main
+    gemini_api_key: str = ""             # required at runtime if provider is gemini; checked in main
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     gemini_model: str = "gemini-2.5-flash"
     gemini_temperature: float = 0.4    # lower = more accurate, less hallucination
     gemini_max_tokens: int = 8192      # higher = complete answers, no truncation
+    gemini_timeout_seconds: float = 60.0
+
+    # --- Grok / xAI (OpenAI-compatible endpoint) -------------------------
+    # xAI documents XAI_API_KEY; GROK_API_KEY is accepted as a convenient alias.
+    xai_api_key: str = ""
+    grok_api_key: str = ""
+    grok_base_url: str = "https://api.x.ai/v1"
+    grok_model: str = "grok-4.5"
+    grok_temperature: float = 0.35
+    grok_max_tokens: int = 8192
+    grok_timeout_seconds: float = 120.0
+
+    # --- Groq Cloud (OpenAI-compatible endpoint) -------------------------
+    groq_api_key: str = ""               # required at runtime if provider is groq; checked in main
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_temperature: float = 0.4
+    groq_max_tokens: int = 4096
+    groq_timeout_seconds: float = 60.0
+
+    # --- Nvidia (OpenAI-compatible endpoint) -----------------------------
+    nvidia_api_key: str = ""
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    nvidia_temperature: float = 1.0
+    nvidia_max_tokens: int = 16384
+    nvidia_timeout_seconds: float = 60.0
 
     # --- Offline LLM fallback --------------------------------------------
     local_llm_enabled: bool = True
@@ -53,20 +104,39 @@ class Settings(BaseSettings):
     stt_compute_type: str = "auto"         # auto -> int8_float16 on GPU else int8
     stt_language: Optional[str] = None     # None = auto-detect; e.g. "en", "hi"
     openai_api_key: str = ""               # only if stt_engine == "whisper_api"
+    
+    # --- VAD (Voice Activity Detection) Parameters ------------------------
+    vad_threshold: float = 0.35
+    vad_min_speech_duration_ms: int = 150
+    vad_min_silence_duration_ms: int = 500
+    vad_speech_pad_ms: int = 300
 
     # --- Text-to-speech ---------------------------------------------------
-    tts_engine: str = "elevenlabs"         # "edge", "elevenlabs", or "gemini_live"
-    edge_voice: str = "en-US-AriaNeural"   # female, expressive
+    # Engine priority:
+    #   "auto"    → try Kokoro (local GPU) first, fall back to Edge TTS
+    #   "kokoro"  → local GPU only (ONNX, no numba, no DLL issues)
+    #   "edge"    → Microsoft Edge TTS cloud only
+    tts_engine: str = "auto"
+
+    # Kokoro TTS settings
+    tts_kokoro_voice: str = "af_heart"    # warm natural female (af_heart, af_nova, af_sky)
+    tts_kokoro_speed: float = 1.0          # 1.0 = normal; 0.8 = slower; 1.2 = faster
+    tts_kokoro_lang: str = "a"             # "a"=American EN, "b"=British EN, "h"=Hindi(exp)
+
+    # Edge TTS fallback voice (hi-IN-SwaraNeural supports English and Hindi seamlessly)
+    tts_edge_voice: str = "hi-IN-SwaraNeural"
+
+    # Chatterbox TTS settings (best bilingual human voice)
+    tts_chatterbox_enabled: bool = True
+
+    # ElevenLabs TTS settings (best humanized, multilingual)
     elevenlabs_api_key: str = ""
-    elevenlabs_voice_id: str = "Xb7hH8MSUJpSbSDYk0k2"
-    elevenlabs_model: str = "eleven_multilingual_v2"
+    tts_elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb" # George (or any preferred ID)
+    tts_elevenlabs_model: str = "eleven_multilingual_v2" # Supports English and Hindi natively
+
+    # Audio output
     tts_sample_rate: int = 24000
-    gemini_live_model: str = "gemini-3.1-flash-live-preview"
-    gemini_live_voice_name: str = "Aoede"
-    gemini_live_style: str = (
-        "Speak naturally, warmly, and briefly. Use human pacing, small pauses, "
-        "and the same language as the text. Do not add extra content."
-    )
+    tts_use_fp16: bool = True              # enable FP16 if model supports it
 
     # --- Ngrok / mobile tunnel -------------------------------------------
     ngrok_enabled: bool = True
@@ -102,9 +172,28 @@ class Settings(BaseSettings):
     session_token_ttl_seconds: int = 60 * 60 * 12  # 12h per authenticated WS
 
     # --- Wake word detection (optional, hands-free activation) -----------
-    wake_word_enabled: bool = False        # set to True to enable
-    wake_word_engine: str = "simple"       # "porcupine", "vosk", or "simple"
-    wake_word_keywords: list[str] = ["hey genie", "okay genie", "hi genie", "genie"]
+    wake_word_enabled: bool = True         # enabled by default
+    wake_word_engine: str = "vosk"         # "porcupine", "vosk", or "simple"
+    wake_word_keywords: list[str] = ["hey genie", "okay genie", "hi genie", "hello genie", "ok genie", "genie", "wake up"]
+    wake_word_cooldown_ms: int = 1500
+
+    # --- Continuous Conversation ---
+    follow_up_mode: bool = True
+    follow_up_timeout_seconds: int = 8
+    
+    # --- Recovery ---
+    voice_recovery_enabled: bool = True
+    voice_max_retries: int = 3
+
+    # --- v12: Barge-In Feature Flag (instant rollback to v11 behaviour) ----
+    # Set ENABLE_BARGE_IN=false in .env to revert to manual-only cancellation.
+    enable_barge_in: bool = True
+
+    # --- v12: Two-Tier VAD Endpointing ------------------------------------
+    # Short timeout fires when the last words sound like a finished sentence.
+    # Long timeout fires when the utterance might still continue (trailing thought).
+    vad_endpointing_short_ms: int = 500    # e.g. "What's the time?" → 500ms
+    vad_endpointing_long_ms: int = 900     # e.g. "and... actually—" → 900ms
 
     @property
     def effective_pin(self) -> str:

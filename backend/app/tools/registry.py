@@ -20,7 +20,9 @@ import inspect
 import typing
 from dataclasses import dataclass
 from typing import Any, Callable, get_args, get_origin, get_type_hints
+from uuid import uuid4
 
+from ..os.permissions import SideEffectLevel, side_effect_from_value
 from ..schemas import ToolResult
 
 
@@ -55,6 +57,11 @@ class ToolEntry:
     description: str
     parameters: dict[str, Any]            # JSON schema of the arguments
     func: Callable[..., ToolResult]
+    side_effect_level: SideEffectLevel = SideEffectLevel.READ_ONLY
+    permissions: tuple[str, ...] = ()
+    timeout_ms: int = 30_000
+    audit_category: str = "general"
+    streaming: bool = False
 
     def to_schema(self) -> dict[str, Any]:
         """OpenAI/GLM tool descriptor (function-calling format)."""
@@ -67,18 +74,49 @@ class ToolEntry:
             },
         }
 
+    def to_manifest(self) -> dict[str, Any]:
+        """Runtime manifest used by Genie OS tool discovery and UI audit panels."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+            "side_effect_level": self.side_effect_level.value,
+            "permissions": list(self.permissions),
+            "timeout_ms": self.timeout_ms,
+            "audit_category": self.audit_category,
+            "streaming": self.streaming,
+        }
+
 
 # Global registry. Tool modules register themselves at import time.
 REGISTRY: dict[str, ToolEntry] = {}
 
 
-def tool(func: Callable[..., ToolResult]) -> Callable[..., ToolResult]:
+def tool(
+    func: Callable[..., ToolResult] | None = None,
+    *,
+    side_effect_level: str | SideEffectLevel | None = None,
+    permissions: tuple[str, ...] | list[str] = (),
+    timeout_ms: int = 30_000,
+    audit_category: str = "general",
+    streaming: bool = False,
+) -> Callable[..., ToolResult]:
     """Decorator that registers `func` and derives its schema from type hints.
 
     The function's docstring becomes the tool description; the first line is
     used as a short summary. Parameters are derived from annotations, and any
     parameter with a default value is marked as not required.
     """
+    if func is None:
+        return lambda wrapped: tool(
+            wrapped,
+            side_effect_level=side_effect_level,
+            permissions=permissions,
+            timeout_ms=timeout_ms,
+            audit_category=audit_category,
+            streaming=streaming,
+        )
+
     name = func.__name__
     sig = inspect.signature(func)
     try:
@@ -121,6 +159,11 @@ def tool(func: Callable[..., ToolResult]) -> Callable[..., ToolResult]:
         description=description,
         parameters=parameters,
         func=func,
+        side_effect_level=side_effect_from_value(side_effect_level) if side_effect_level else _infer_side_effect(name),
+        permissions=tuple(permissions),
+        timeout_ms=timeout_ms,
+        audit_category=audit_category,
+        streaming=streaming,
     )
     return func
 
@@ -142,6 +185,11 @@ def tool_schemas() -> list[dict[str, Any]]:
     return [entry.to_schema() for entry in REGISTRY.values()]
 
 
+def tool_manifests() -> list[dict[str, Any]]:
+    """All registered tool manifests with runtime policy metadata."""
+    return [entry.to_manifest() for entry in REGISTRY.values()]
+
+
 def execute_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
     """Dispatch a tool call by name. Returns a ToolResult on any path.
 
@@ -155,20 +203,71 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             message=f"Unknown tool '{name}'.",
             data={"available": list(REGISTRY.keys())},
         )
+
+    call_id = f"tool_{uuid4().hex}"
+    _emit_tool_started(entry, call_id, arguments)
     try:
         result = entry.func(**arguments)
         if not isinstance(result, ToolResult):
-            return ToolResult(status="ok", message=str(result))
+            result = ToolResult(status="ok", message=str(result))
+        _emit_tool_completed(entry, call_id, result)
         return result
     except TypeError as e:
         # Bad/missing arguments from the model.
-        return ToolResult(
+        result = ToolResult(
             status="error",
             message=f"Invalid arguments for '{name}': {e}",
             data={"parameters": entry.parameters},
         )
+        _emit_tool_completed(entry, call_id, result)
+        return result
     except Exception as e:  # noqa: BLE001 - surface every failure to the model
-        return ToolResult(
+        result = ToolResult(
             status="error",
             message=f"Tool '{name}' failed: {e.__class__.__name__}: {e}",
         )
+        _emit_tool_completed(entry, call_id, result)
+        return result
+
+
+def _infer_side_effect(name: str) -> SideEffectLevel:
+    n = name.lower()
+    if n.startswith(("search_", "get_", "capture_", "read_", "calculate")):
+        return SideEffectLevel.READ_ONLY
+    if "news" in n or "weather" in n or "time" in n:
+        return SideEffectLevel.READ_ONLY
+    if "clipboard_read" in n:
+        return SideEffectLevel.PERSONAL_DATA
+    if n in {"clipboard_write", "ghost_type", "set_volume", "trigger_night_light"}:
+        return SideEffectLevel.LOCAL_CHANGE
+    if n.startswith(("open_", "play_")):
+        return SideEffectLevel.EXTERNAL_NETWORK if "url" in n or "youtube" in n else SideEffectLevel.LOCAL_CHANGE
+    if n.startswith(("close_", "sleep_", "launch_")):
+        return SideEffectLevel.LOCAL_CHANGE
+    return SideEffectLevel.READ_ONLY
+
+
+def _emit_tool_started(entry: ToolEntry, call_id: str, arguments: dict[str, Any]) -> None:
+    try:
+        from ..os import get_kernel
+
+        get_kernel().record_tool_started(
+            tool_name=entry.name,
+            arguments={"call_id": call_id, **(arguments or {})},
+            side_effect_level=entry.side_effect_level,
+        )
+    except Exception:
+        return
+
+
+def _emit_tool_completed(entry: ToolEntry, call_id: str, result: ToolResult) -> None:
+    try:
+        from ..os import get_kernel
+
+        get_kernel().record_tool_completed(
+            tool_name=entry.name,
+            status=result.status,
+            message=f"{call_id}: {result.message}",
+        )
+    except Exception:
+        return

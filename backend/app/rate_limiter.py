@@ -1,4 +1,4 @@
-"""Rate limiting for LLM API requests — NO response caching.
+"""Rate limiting for cloud LLM API requests — NO response caching.
 
 Root cause of the cache-hit loop that was logged:
   _make_cache_key used only the last 2 messages.  Within a single ReAct turn
@@ -15,7 +15,7 @@ Decision: remove response caching entirely.
   - The only safe cache hit is an *exact* repeat of the full conversation — a
     rare event that doesn't justify the complexity or the bugs.
   - Rate limiting (RPM tracking + wait) is preserved: that part works correctly
-    and is genuinely needed for the Gemini free tier.
+    and is genuinely needed for quota-limited cloud model tiers.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ log = logging.getLogger("genie.rate_limiter")
 
 
 class RateLimiter:
-    """Token-bucket rate limiter for Gemini API requests."""
+    """Token-bucket rate limiter for cloud LLM API requests."""
 
     def __init__(self, max_requests_per_minute: int = 15):
         self.max_rpm = max_requests_per_minute
@@ -84,5 +84,7 @@ _rate_limiter: RateLimiter | None = None
 def get_rate_limiter() -> RateLimiter:
     global _rate_limiter
     if _rate_limiter is None:
-        _rate_limiter = RateLimiter(max_requests_per_minute=15)
+        from .config import get_settings
+        settings = get_settings()
+        _rate_limiter = RateLimiter(max_requests_per_minute=settings.openrouter_rpm)
     return _rate_limiter

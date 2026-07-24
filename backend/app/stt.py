@@ -60,17 +60,34 @@ def _get_fw_model(settings: Settings):
 
 
 def transcribe_fw(audio_bytes: bytes, settings: Settings) -> str:
-    """Transcribe raw audio bytes with faster-whisper. Accepts webm/wav/mp3."""
+    """Transcribe raw PCM16 audio bytes with faster-whisper.
+    The backend VAD service provides raw 16-bit 16kHz mono PCM.
+    """
     model = _get_fw_model(settings)
-    buf   = io.BytesIO(audio_bytes)
-    buf.name = "audio.webm"  # hint for ffmpeg-backed decoder
-    segments, _info = model.transcribe(
-        buf,
-        language=settings.stt_language or None,
-        vad_filter=True,
-        beam_size=1,
-    )
-    return "".join(seg.text for seg in segments).strip()
+    import numpy as np
+
+    try:
+        # Convert raw s16le PCM bytes to float32 numpy array for faster-whisper
+        audio_array = np.frombuffer(audio_bytes, np.int16).astype(np.float32) / 32768.0
+        
+        segments, _info = model.transcribe(
+            audio_array,
+            language=settings.stt_language or None,
+            vad_filter=True,
+            vad_parameters={
+                "threshold": settings.vad_threshold,
+                "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+                "min_speech_duration_ms": settings.vad_min_speech_duration_ms,
+                "speech_pad_ms": settings.vad_speech_pad_ms,
+            },
+            beam_size=5,
+            initial_prompt="Genie, YouTube, Spotify, GitHub, Google, Gmail, Chrome, Visual Studio Code, VS Code, Python, FastAPI, React, Next.js, OpenAI, Mistral, Groq, Qwen, Llama, WhatsApp, Windows.",
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
+        )
+        return "".join(seg.text for seg in segments).strip()
+    except Exception as err:
+        raise RuntimeError(f"Failed to transcribe raw audio: {err}") from err
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,36 +112,33 @@ async def transcribe_whisper_api(audio_bytes: bytes, settings: Settings) -> str:
 async def transcribe(audio_bytes: bytes, settings: Optional[Settings] = None) -> str:
     """Transcribe audio bytes using the configured engine.
 
-    Fallback: if the primary engine fails, try the other engine. If both fail,
-    return "" so the caller can surface a clean error to the user.
+    Uses faster-whisper (local) as the primary engine.
+    Cloud fallback is intentionally disabled — it requires billing on OpenAI.
+    If local transcription fails, returns "" so the caller shows a clean error.
 
     `faster_whisper` is sync/CPU-bound → runs in a worker thread.
-    The cloud Whisper API is natively async.
     """
     settings = settings or get_settings()
     if not audio_bytes:
         return ""
 
+    # Reject audio that is too short to contain speech (< 1KB = likely empty/header only)
+    if len(audio_bytes) < 1024:
+        log.info("stt_audio_too_short", bytes=len(audio_bytes))
+        return ""
+
     import asyncio
 
-    # ── Primary: faster-whisper ───────────────────────────────────────────────
+    # ── Local faster-whisper (primary & only engine for robustness) ───────────
     if settings.stt_engine != "whisper_api":
         try:
             result = await asyncio.to_thread(transcribe_fw, audio_bytes, settings)
-            if result:
-                return result
+            return result  # may be "" if silence — that's fine
         except RuntimeError as e:
             log.warning("whisper_local_failed", error=str(e))
-        except Exception as e:  # noqa: BLE001 - PyAV InvalidDataError etc.
+        except Exception as e:  # noqa: BLE001
             log.warning("whisper_local_ignored", error=str(e))
-
-        # Fallback to cloud API if key is available
-        if settings.openai_api_key:
-            log.info("stt_fallback_to_cloud")
-            try:
-                return await transcribe_whisper_api(audio_bytes, settings)
-            except Exception as e:
-                log.warning("whisper_api_also_failed", error=str(e))
+        # Cloud fallback intentionally removed — causes 10s delays due to quota errors.
         return ""
 
     # ── Primary: Whisper API ──────────────────────────────────────────────────

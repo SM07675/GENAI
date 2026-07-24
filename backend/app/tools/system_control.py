@@ -152,3 +152,70 @@ def sleep_pc() -> ToolResult:
             status="error",
             message=f"I couldn't put the PC to sleep: {e}",
         )
+
+
+@tool
+def shutdown_pc() -> ToolResult:
+    """Shutdown the PC immediately."""
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["shutdown", "/s", "/t", "0"], creationflags=subprocess.CREATE_NO_WINDOW)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+        else:
+            subprocess.Popen(["systemctl", "poweroff"])
+        return ToolResult(
+            status="ok",
+            message="Shutting down the PC. Goodbye!",
+            data={"action": "shutdown"},
+        )
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(
+            status="error",
+            message=f"I couldn't shut down the PC: {e}",
+        )
+
+
+@tool
+def restart_pc() -> ToolResult:
+    """Restart the PC immediately."""
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["shutdown", "/r", "/t", "0"], creationflags=subprocess.CREATE_NO_WINDOW)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["sudo", "shutdown", "-r", "now"])
+        else:
+            subprocess.Popen(["systemctl", "reboot"])
+        return ToolResult(
+            status="ok",
+            message="Restarting the PC. Be right back!",
+            data={"action": "restart"},
+        )
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(
+            status="error",
+            message=f"I couldn't restart the PC: {e}",
+        )
+
+
+@tool
+def lock_pc() -> ToolResult:
+    """Lock the PC screen immediately."""
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"], creationflags=subprocess.CREATE_NO_WINDOW)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["pmset", "displaysleepnow"])
+        else:
+            subprocess.Popen(["loginctl", "lock-session"])
+        return ToolResult(
+            status="ok",
+            message="PC locked securely.",
+            data={"action": "lock"},
+        )
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(
+            status="error",
+            message=f"I couldn't lock the PC: {e}",
+        )
+

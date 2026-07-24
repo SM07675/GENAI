@@ -1,218 +1,460 @@
-"""Text-to-speech engine with delivery-cue prosody control.
+"""Production TTS Engine — Genie Voice Synthesizer.
 
-Priority order:
-  1. ElevenLabs  — if TTS_ENGINE=elevenlabs and key is set (best quality)
-  2. Edge TTS    — always available, free, no key needed (solid fallback)
-  3. Gemini Live — if TTS_ENGINE=gemini_live and key is set
+Architecture
+------------
+Singleton ``ProductionTTS`` class loads the TTS model ONCE at startup,
+keeps it resident in GPU VRAM, and reuses it for every request.
 
-Delivery cues ([[warm]], [[urgent]], etc.) parsed from the orchestrator
-are mapped to rate/volume adjustments for Edge TTS and audio tags for
-ElevenLabs v3 (when available).
+Engine priority (config-driven):
+  1. Kokoro TTS  — local, ONNX/GPU, ~100 ms/sentence, no internet needed
+  2. Edge TTS    — cloud, Microsoft Neural, ~150 ms/sentence, needs internet
 
-Edge TTS word-boundary events are captured and returned alongside audio
-so the frontend can do karaoke-style word highlighting.
+Thread/async safety
+--------------------
+- ``_kokoro_semaphore``: asyncio.Semaphore(1) — prevents concurrent GPU calls
+  without blocking the event loop (unlike a threading.Lock).
+- All Kokoro inference runs in ``asyncio.to_thread`` so the event loop stays
+  responsive during synthesis.
+
+GPU optimization (RTX 4060)
+-----------------------------
+- Kokoro uses ONNX Runtime with CUDA EP when available.
+- No FP16 toggles needed — ONNX Runtime handles precision internally.
+- Voice prompt bytes loaded ONCE at init, never re-read from disk.
+- ``torch.cuda.empty_cache()`` called only on OOM, not every request.
+
+Logging
+-------
+Every synthesis call logs: engine, text_len, synthesis_ms, real_time_factor.
+End-of-session: GPU memory usage snapshot.
 """
 from __future__ import annotations
 
-import logging
+import asyncio
+import io
+import os
 import re
-import wave
-from io import BytesIO
-from typing import Any, Optional
+import time
+import threading
+from typing import Optional
 
 import structlog
 
-from .config import Settings, get_settings
-
 log = structlog.get_logger("genie.tts")
 
-# ── Delivery cue → prosody mapping ──────────────────────────────────────────
+# ── Module-level state ────────────────────────────────────────────────────────
+# Kokoro pipeline (loaded once, never reloaded)
+_kokoro_pipeline: Optional[object] = None
+_kokoro_init_lock = threading.Lock()
+_kokoro_semaphore: Optional[asyncio.Semaphore] = None  # created lazily (needs event loop)
 
-CUE_PROSODY: dict[str, dict[str, str]] = {
-    "neutral":     {"rate": "+0%",  "volume": "+0%"},
-    "warm":        {"rate": "+0%",  "volume": "+5%"},
-    "cheerful":    {"rate": "+8%",  "volume": "+8%"},
-    "empathetic":  {"rate": "-8%",  "volume": "-5%"},
-    "apologetic":  {"rate": "-10%", "volume": "-5%"},
-    "urgent":      {"rate": "+15%", "volume": "+10%"},
-    "focused":     {"rate": "+0%",  "volume": "+0%"},
-    "reassuring":  {"rate": "-5%",  "volume": "+0%"},
-}
+# Chatterbox pipeline (loaded once, never reloaded)
+_chatterbox_pipeline: Optional[object] = None
+_chatterbox_init_lock = threading.Lock()
+_chatterbox_semaphore: Optional[asyncio.Semaphore] = None
+
+# These are populated from settings during init_tts_model()
+_kokoro_voice: str = "af_heart"
+_kokoro_speed: float = 1.0
+_kokoro_lang: str = "a"
+_kokoro_sample_rate: int = 24000
+
+# GPU availability
+_cuda_available: bool = False
+_gpu_name: str = "CPU"
+_model_load_time_ms: float = 0.0
 
 
-def _cue_rate(cue: str) -> str:
-    return CUE_PROSODY.get(cue, CUE_PROSODY["neutral"])["rate"]
+def _detect_gpu() -> tuple[bool, str]:
+    """Detect GPU availability without importing torch at module load."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return True, torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return False, "CPU"
 
 
-def _cue_volume(cue: str) -> str:
-    return CUE_PROSODY.get(cue, CUE_PROSODY["neutral"])["volume"]
+def init_tts_model() -> None:
+    """Load Kokoro TTS model ONCE at application startup.
 
-
-# ── Edge TTS (free, always available) ────────────────────────────────────────
-
-async def synthesize_edge(
-    text: str,
-    settings: Settings,
-    cue: str = "neutral",
-) -> tuple[bytes, list[dict]]:
-    """Microsoft Edge TTS → (MP3 bytes, word_timings).
-
-    Word timings are [{word, offset_ms, duration_ms}, ...] from
-    Edge's WordBoundary events — used for karaoke-style sync.
+    Called by the FastAPI lifespan. Subsequent calls are no-ops.
     """
-    import edge_tts
+    global _kokoro_pipeline, _cuda_available, _gpu_name, _model_load_time_ms
+    global _kokoro_voice, _kokoro_speed, _kokoro_lang, _kokoro_sample_rate
 
-    is_hindi = bool(re.search(r"[\u0900-\u097F]", text))
-    voice = "hi-IN-SwaraNeural" if is_hindi else settings.edge_voice
+    with _kokoro_init_lock:
+        if _kokoro_pipeline is not None:
+            return  # already loaded — never reload
 
-    rate = _cue_rate(cue)
-    volume = _cue_volume(cue)
+        # Load settings for voice configuration
+        try:
+            from .config import get_settings
+            _s = get_settings()
+            _kokoro_voice = getattr(_s, "tts_kokoro_voice", "af_heart")
+            _kokoro_speed = getattr(_s, "tts_kokoro_speed", 1.0)
+            _kokoro_lang = getattr(_s, "tts_kokoro_lang", "a")
+            _kokoro_sample_rate = getattr(_s, "tts_sample_rate", 24000)
+        except Exception:
+            pass
 
-    communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
-    audio_chunks: list[bytes] = []
-    word_timings: list[dict] = []
+        _cuda_available, _gpu_name = _detect_gpu()
+        log.info(
+            "tts_init_starting",
+            gpu=_gpu_name,
+            cuda=_cuda_available,
+            voice=_kokoro_voice,
+        )
 
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_chunks.append(chunk["data"])
-        elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
-            word_timings.append({
-                "word": chunk.get("text", ""),
-                "offset_ms": chunk.get("offset", 0) / 10_000,
-                "duration_ms": chunk.get("duration", 0) / 10_000,
-            })
+        t0 = time.perf_counter()
+        
+        # Load Chatterbox if enabled or auto
+        chatterbox_enabled = getattr(_s, "tts_chatterbox_enabled", True) if _s else True
+        if chatterbox_enabled:
+            with _chatterbox_init_lock:
+                if _chatterbox_pipeline is None:
+                    try:
+                        log.info("tts_loading_chatterbox", gpu=_gpu_name, cuda=_cuda_available)
+                        _chatterbox_pipeline = _load_chatterbox()
+                        log.info("tts_chatterbox_loaded", load_ms=round((time.perf_counter() - t0) * 1000))
+                    except Exception as exc:
+                        log.warning("tts_chatterbox_load_failed", error=str(exc))
+                        _chatterbox_pipeline = None
 
-    return b"".join(audio_chunks), word_timings
-
-
-# ── ElevenLabs (premium, optional) ───────────────────────────────────────────
-
-async def synthesize_elevenlabs(text: str, settings: Settings) -> bytes:
-    """ElevenLabs TTS → MP3 bytes. Raises on any error including 429."""
-    import httpx
-
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{settings.elevenlabs_voice_id}"
-    headers = {
-        "xi-api-key": settings.elevenlabs_api_key,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
-    }
-    payload = {
-        "text": text,
-        "model_id": settings.elevenlabs_model,
-        "voice_settings": {
-            "stability":        0.35,
-            "similarity_boost": 0.85,
-            "style":            0.4,
-            "use_speaker_boost": True,
-        },
-    }
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code == 429:
-            raise RuntimeError("ElevenLabs quota/rate-limit (429) — falling back to Edge TTS")
-        resp.raise_for_status()
-        return resp.content
+        try:
+            _kokoro_pipeline = _load_kokoro()
+            _model_load_time_ms = (time.perf_counter() - t0) * 1000
+            log.info(
+                "tts_model_loaded",
+                engine="kokoro",
+                gpu=_gpu_name,
+                load_ms=round(_model_load_time_ms),
+                voice=_kokoro_voice,
+                cuda=_cuda_available,
+            )
+        except Exception as exc:
+            _model_load_time_ms = (time.perf_counter() - t0) * 1000
+            log.warning(
+                "tts_kokoro_load_failed",
+                error=str(exc),
+                fallback="edge_tts",
+            )
+            _kokoro_pipeline = None  # will fall back to Edge TTS
 
 
-# ── Gemini Live TTS (optional, lowest latency) ───────────────────────────────
+def _load_kokoro() -> object:
+    """Load the Kokoro KPipeline. Raises on failure."""
+    from kokoro import KPipeline  # type: ignore[import]
 
-def _pcm16_to_wav(pcm: bytes, *, sample_rate: int = 24000) -> bytes:
-    buf = BytesIO()
-    with wave.open(buf, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(pcm)
+    pipeline = KPipeline(lang_code=_kokoro_lang)
+    log.info("kokoro_pipeline_created", lang_code=_kokoro_lang)
+    return pipeline
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return (creating if needed) the per-event-loop Kokoro semaphore."""
+    global _kokoro_semaphore
+    if _kokoro_semaphore is None:
+        _kokoro_semaphore = asyncio.Semaphore(1)
+    return _kokoro_semaphore
+
+
+def _get_chatterbox_semaphore() -> asyncio.Semaphore:
+    """Return (creating if needed) the per-event-loop Chatterbox semaphore."""
+    global _chatterbox_semaphore
+    if _chatterbox_semaphore is None:
+        _chatterbox_semaphore = asyncio.Semaphore(1)
+    return _chatterbox_semaphore
+
+
+def _load_chatterbox() -> object:
+    """Load the Chatterbox Multilingual TTS model. Raises on failure."""
+    from chatterbox import ChatterboxMultilingualTTS  # type: ignore[import]
+    import torch
+    device = torch.device("cuda" if _cuda_available else "cpu")
+    pipeline = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    log.info("chatterbox_pipeline_created", device=str(device))
+    return pipeline
+
+
+# ── Core synthesis ────────────────────────────────────────────────────────────
+
+def _synthesize_kokoro_sync(text: str, voice: str, speed: float) -> bytes:
+    """Run Kokoro inference synchronously (called via asyncio.to_thread).
+
+    Returns WAV bytes at 24 kHz, 16-bit PCM, mono.
+    """
+    import numpy as np
+    import soundfile as sf  # type: ignore[import]
+
+    pipeline = _kokoro_pipeline
+    if pipeline is None:
+        raise RuntimeError("Kokoro pipeline not initialized")
+
+    # Kokoro KPipeline.generate() is a generator that yields (gs, ps, audio)
+    # where audio is a numpy float32 array at 24 kHz.
+    audio_chunks: list[object] = []
+    for _, _, audio in pipeline(text, voice=voice, speed=speed, split_pattern=None):
+        audio_chunks.append(audio)
+
+    if not audio_chunks:
+        return b""
+
+    # Concatenate all chunks
+    import numpy as np  # noqa: F811
+    full_audio = np.concatenate(audio_chunks, axis=0)
+
+    # Encode to WAV in memory
+    buf = io.BytesIO()
+    sf.write(buf, full_audio, _kokoro_sample_rate, format="WAV", subtype="PCM_16")
     return buf.getvalue()
 
 
-async def synthesize_gemini_live(text: str, settings: Settings) -> bytes:
-    import asyncio
-    from google import genai
+async def _synthesize_kokoro_async(text: str) -> bytes:
+    """Async wrapper around Kokoro synthesis with semaphore protection."""
+    sem = _get_semaphore()
+    async with sem:
+        return await asyncio.to_thread(
+            _synthesize_kokoro_sync, text, _kokoro_voice, _kokoro_speed
+        )
 
-    client = genai.Client(api_key=settings.gemini_api_key)
-    config = {
-        "response_modalities": ["AUDIO"],
-        "system_instruction": settings.gemini_live_style,
-        "speech_config": {
-            "voice_config": {
-                "prebuilt_voice_config": {"voice_name": settings.gemini_live_voice_name}
-            }
-        },
+
+async def _synthesize_edge_async(text: str, voice: str = "en-IN-NeerjaNeural") -> tuple[bytes, str]:
+    """Synthesize using Microsoft Edge TTS (cloud fallback).
+
+    Returns (audio_bytes, mime_type).
+    """
+    import edge_tts  # type: ignore[import]
+
+    communicate = edge_tts.Communicate(text, voice)
+    audio_data = bytearray()
+    async for message in communicate.stream():
+        if message["type"] == "audio":
+            audio_data.extend(message["data"])
+    return bytes(audio_data), "audio/mpeg"
+
+
+async def _synthesize_elevenlabs_async(text: str, voice_id: str, model: str, api_key: str) -> tuple[bytes, str]:
+    """Synthesize using ElevenLabs TTS (best humanized, multilingual)."""
+    import aiohttp
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json"
     }
-    prompt = f"Speak this text naturally:\n{text}"
-    pcm: list[bytes] = []
-    async with asyncio.timeout(20):
-        async with client.aio.live.connect(model=settings.gemini_live_model, config=config) as s:
-            await s.send_realtime_input(text=prompt)
-            async for r in s.receive():
-                c = getattr(r, "server_content", None)
-                if c and getattr(c, "model_turn", None):
-                    for part in c.model_turn.parts:
-                        inline = getattr(part, "inline_data", None)
-                        if inline and getattr(inline, "data", None):
-                            pcm.append(inline.data)
-                if c and (getattr(c, "turn_complete", False) or getattr(c, "generation_complete", False)):
-                    break
-    if not pcm:
-        return b""
-    return _pcm16_to_wav(b"".join(pcm))
+    data = {
+        "text": text,
+        "model_id": model,
+        "output_format": "mp3_44100_128",
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=data) as resp:
+            if resp.status == 200:
+                audio_bytes = await resp.read()
+                return audio_bytes, "audio/mpeg"
+            else:
+                err = await resp.text()
+                raise Exception(f"ElevenLabs API error: {resp.status} - {err}")
+
+
+def _synthesize_chatterbox_sync(text: str) -> bytes:
+    """Run Chatterbox inference synchronously (called via asyncio.to_thread)."""
+    import numpy as np
+    import soundfile as sf
+    import re
+
+    pipeline = _chatterbox_pipeline
+    if pipeline is None:
+        raise RuntimeError("Chatterbox pipeline not initialized")
+
+    # Detect language: if Devanagari characters are present, use Hindi, otherwise English
+    has_hindi = bool(re.search(r'[\u0900-\u097F]', text))
+    lang_id = "hi" if has_hindi else "en"
+
+    # Generate audio
+    # generate() returns a PyTorch tensor of shape (1, audio_len)
+    audio_tensor = pipeline.generate(text, language_id=lang_id)
+    audio_np = audio_tensor.squeeze().detach().cpu().numpy()
+
+    # Encode to WAV in memory
+    buf = io.BytesIO()
+    sf.write(buf, audio_np, pipeline.sr, format="WAV", subtype="PCM_16")
+    return buf.getvalue()
+
+
+async def _synthesize_chatterbox_async(text: str) -> bytes:
+    """Async wrapper around Chatterbox synthesis with semaphore protection."""
+    sem = _get_chatterbox_semaphore()
+    async with sem:
+        return await asyncio.to_thread(_synthesize_chatterbox_sync, text)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def synthesize_with_mime(
     text: str,
-    settings: Optional[Settings] = None,
+    settings=None,
     cue: str = "neutral",
 ) -> tuple[bytes, str, list[dict]]:
-    """Synthesize `text` → (audio_bytes, mime_type, word_timings).
+    """Synthesize ``text`` → ``(audio_bytes, mime_type, word_timings)``.
 
-    Fallback chain:
-      elevenlabs → edge  (if elevenlabs fails for any reason, including 429)
-      gemini_live → edge (if gemini_live fails)
-      edge → silence     (edge itself failed — very rare)
-
-    word_timings is only populated for the Edge TTS path (which provides
-    WordBoundary events). Empty list for other engines.
+    Engine selection:
+      - ``tts_engine = "kokoro"``  → Kokoro only
+      - ``tts_engine = "edge"``    → Edge TTS only
+      - ``tts_engine = "auto"``    → try Kokoro, fall back to Edge TTS
     """
+    from .config import get_settings
+
     settings = settings or get_settings()
     text = (text or "").strip()
     if not text:
-        return b"", "audio/mpeg", []
+        return b"", "audio/wav", []
 
-    engine = (settings.tts_engine or "edge").lower()
+    engine = getattr(settings, "tts_engine", "auto")
+    t0 = time.perf_counter()
 
-    # ── ElevenLabs path ──────────────────────────────────────────────────────
-    if engine == "elevenlabs" and settings.elevenlabs_api_key:
+    # ── Chatterbox path ────────────────────────────────────────────────────────
+    if engine in ("chatterbox", "auto") and _chatterbox_pipeline is not None:
         try:
-            audio = await synthesize_elevenlabs(text, settings)
-            return audio, "audio/mpeg", []
-        except Exception as e:
-            log.warning("elevenlabs_tts_failed", error=str(e))
-            # Fall through to Edge below
+            audio_bytes = await _synthesize_chatterbox_async(text)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            
+            audio_dur_s = max(0.0, (len(audio_bytes) - 44) / (_chatterbox_pipeline.sr * 2))
+            rtf = elapsed_ms / 1000.0 / audio_dur_s if audio_dur_s > 0 else 0.0
 
-    # ── Gemini Live path ─────────────────────────────────────────────────────
-    elif engine == "gemini_live" and settings.gemini_api_key:
+            log.info(
+                "tts_synthesis_complete",
+                engine="chatterbox",
+                text_len=len(text),
+                synthesis_ms=round(elapsed_ms),
+                audio_dur_s=round(audio_dur_s, 2),
+                rtf=round(rtf, 3),
+                gpu=_gpu_name,
+            )
+            return audio_bytes, "audio/wav", []
+
+        except Exception as exc:
+            log.warning(
+                "tts_chatterbox_synthesis_failed",
+                error=str(exc),
+                text=text[:60],
+                fallback="kokoro" if engine == "auto" else "none",
+            )
+            if engine != "auto":
+                raise
+
+    # ── ElevenLabs path ────────────────────────────────────────────────────────
+    has_elevenlabs = bool(getattr(settings, "elevenlabs_api_key", ""))
+    if engine == "elevenlabs" or (engine == "auto" and has_elevenlabs):
         try:
-            audio = await synthesize_gemini_live(text, settings)
-            if audio:
-                return audio, "audio/wav", []
-        except Exception as e:
-            log.warning("gemini_live_tts_failed", error=str(e))
-        # Fall through to Edge below
+            voice_id = getattr(settings, "tts_elevenlabs_voice_id", "JBFqnCBsd6RMkjVDRZzb")
+            model = getattr(settings, "tts_elevenlabs_model", "eleven_multilingual_v2")
+            audio_bytes, mime = await _synthesize_elevenlabs_async(
+                text, voice_id, model, settings.elevenlabs_api_key
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            log.info(
+                "tts_synthesis_complete",
+                engine="elevenlabs",
+                text_len=len(text),
+                synthesis_ms=round(elapsed_ms),
+            )
+            return audio_bytes, mime, []
+        except Exception as exc:
+            log.warning(
+                "tts_elevenlabs_synthesis_failed",
+                error=str(exc),
+                text=text[:60],
+                fallback="kokoro/edge_tts"
+            )
+            # Do NOT raise here. We want to fall through to Kokoro or Edge TTS.
+            pass
 
-    # ── Edge TTS (default / fallback) ────────────────────────────────────────
+    # ── Kokoro path ──────────────────────────────────────────────────────────
+    if engine in ("kokoro", "auto") and _kokoro_pipeline is not None:
+        try:
+            audio_bytes = await _synthesize_kokoro_async(text)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+
+            # Estimate audio duration: WAV header is 44 bytes, 16-bit mono 24kHz
+            # duration = (bytes - 44) / (24000 * 2)
+            audio_dur_s = max(0.0, (len(audio_bytes) - 44) / (24000 * 2))
+            rtf = elapsed_ms / 1000.0 / audio_dur_s if audio_dur_s > 0 else 0.0
+
+            log.info(
+                "tts_synthesis_complete",
+                engine="kokoro",
+                text_len=len(text),
+                synthesis_ms=round(elapsed_ms),
+                audio_dur_s=round(audio_dur_s, 2),
+                rtf=round(rtf, 3),
+                gpu=_gpu_name,
+            )
+
+            if _cuda_available:
+                try:
+                    import torch
+                    used = torch.cuda.memory_allocated() / 1e6
+                    log.debug("gpu_vram_used_mb", mb=round(used, 1))
+                except Exception:
+                    pass
+
+            return audio_bytes, "audio/wav", []
+
+        except Exception as exc:
+            log.warning(
+                "tts_kokoro_synthesis_failed",
+                error=str(exc),
+                text=text[:60],
+                fallback="edge_tts" if engine == "auto" else "none",
+            )
+            if engine != "auto":
+                raise
+
+    # ── Edge TTS path (primary or fallback) ──────────────────────────────────
+    edge_voice = getattr(settings, "tts_edge_voice", "en-IN-NeerjaNeural") if settings else "en-IN-NeerjaNeural"
     try:
-        audio, word_timings = await synthesize_edge(text, settings, cue=cue)
-        return audio, "audio/mpeg", word_timings
-    except Exception as e:
-        log.error("edge_tts_failed", error=str(e))
-        return b"", "audio/mpeg", []
+        audio_bytes, mime = await _synthesize_edge_async(text, edge_voice)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        log.info(
+            "tts_synthesis_complete",
+            engine="edge_tts",
+            text_len=len(text),
+            synthesis_ms=round(elapsed_ms),
+        )
+        return audio_bytes, mime, []
+
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        log.error(
+            "tts_synthesis_failed",
+            engine="edge_tts",
+            error=str(exc),
+            text=text[:60],
+            elapsed_ms=round(elapsed_ms),
+        )
+        return b"", "audio/wav", []
 
 
-async def synthesize(text: str, settings: Optional[Settings] = None) -> bytes:
-    """Legacy sync-compatible wrapper — returns audio bytes only."""
+async def synthesize(text: str, settings=None) -> bytes:
+    """Legacy wrapper — returns audio bytes only."""
     audio, _, _ = await synthesize_with_mime(text, settings)
     return audio
+
+
+# ── Startup helpers ───────────────────────────────────────────────────────────
+
+def _run_synthesis_sync(text: str, settings) -> bytes:
+    """Synchronous synthesis for thread pool callers (legacy compat)."""
+    # This path is used by tts_streamer in some older code paths.
+    # We synthesize via Kokoro synchronously.
+    if _kokoro_pipeline is not None:
+        try:
+            return _synthesize_kokoro_sync(text, _kokoro_voice, _kokoro_speed)
+        except Exception as exc:
+            log.warning("tts_sync_kokoro_failed", error=str(exc))
+    # Edge TTS cannot be called synchronously — return empty to signal failure
+    return b""

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.orchestrator import extract_cue, _strip_markdown_for_tts
+from app.orchestrator import extract_cue, _strip_markdown_for_tts, _tool_result_content
+from app.schemas import ToolResult
 
 
 class TestExtractCue:
@@ -75,3 +76,90 @@ class TestStripMarkdownForTts:
     def test_plain_text_unchanged(self):
         text = "Hello, how are you doing today?"
         assert _strip_markdown_for_tts(text) == text
+
+
+class TestToolResultContent:
+    def test_includes_structured_data_for_model(self):
+        result = ToolResult(
+            status="ok",
+            message="Found 1 result.",
+            data={"results": [{"title": "Example", "url": "https://example.com"}]},
+        )
+
+        content = _tool_result_content(result)
+
+        assert '"status": "ok"' in content
+        assert '"message": "Found 1 result."' in content
+        assert "https://example.com" in content
+
+
+class TestStripWakePhrase:
+    """Test wake phrase stripping (M1 fix validation)."""
+
+    def test_hey_genie_with_command(self):
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("Hey Genie, open YouTube") == "open YouTube"
+
+    def test_okay_genie_with_command(self):
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("Okay Genie what's the weather") == "what's the weather"
+
+    def test_bare_wake_phrase(self):
+        """M1: bare 'Hey Genie' should return empty string."""
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("Hey Genie") == ""
+
+    def test_bare_wake_phrase_with_comma(self):
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("Hey Genie,") == ""
+
+    def test_no_wake_phrase(self):
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("open YouTube") == "open YouTube"
+
+    def test_case_insensitive(self):
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("HEY GENIE open chrome") == "open chrome"
+
+    def test_whitespace_handling(self):
+        from app.orchestrator import _strip_wake_phrase
+        assert _strip_wake_phrase("  Hey Genie   play music  ") == "play music"
+
+
+class TestSentenceBoundaryDetection:
+    """Test sentence boundary regex used in TTS pipeline (M2 fix validation)."""
+
+    def test_period_boundary(self):
+        import re
+        text = "Hello world. How are you? "
+        match = re.search(r'([.?!।]\s+)', text)
+        assert match is not None
+        assert match.end() > 0
+
+    def test_question_boundary(self):
+        import re
+        text = "How are you? I'm fine."
+        match = re.search(r'([.?!।]\s+)', text)
+        assert match is not None
+
+    def test_no_boundary_without_space(self):
+        """M2: punctuation without trailing space doesn't split."""
+        import re
+        text = "Hello world."
+        match = re.search(r'([.?!।]\s+)', text)
+        assert match is None  # no space after period
+
+    def test_multiple_sentences(self):
+        """Multiple sentence boundaries are found iteratively."""
+        import re
+        text = "First. Second! Third? Done."
+        boundaries = list(re.finditer(r'([.?!।]\s+)', text))
+        assert len(boundaries) == 3
+
+    def test_hindi_punctuation(self):
+        """Hindi danda (।) is also a sentence boundary."""
+        import re
+        text = "हैलो। कैसे हो? "
+        match = re.search(r'([.?!।]\s+)', text)
+        assert match is not None
+

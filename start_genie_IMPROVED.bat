@@ -7,11 +7,11 @@ echo.
 REM Check if backend dependencies are installed
 echo [1/4] Checking backend dependencies...
 cd backend
-python -c "import fastapi" 2>nul
+.venv\Scripts\python.exe -c "import fastapi" 2>nul
 if errorlevel 1 (
     echo.
     echo ERROR: Backend dependencies not installed!
-    echo Please run: pip install -r requirements.txt
+    echo Please run: .venv\Scripts\pip.exe install -r requirements.txt
     echo.
     pause
     exit /b 1

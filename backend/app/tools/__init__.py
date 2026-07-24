@@ -15,9 +15,18 @@ from . import memory      # noqa: F401 (manage_note, set_reminder)
 from . import internet    # noqa: F401 (search_web, get_news, get_news_briefing, get_api_status)
 from . import utilities   # noqa: F401 (get_weather, get_time, calculate, clipboard_read, clipboard_write)
 
-from .registry import REGISTRY as TOOLS, tool, tool_schemas, execute_tool
+from .registry import REGISTRY as TOOLS, tool, tool_manifests, tool_schemas, execute_tool
 
 # Public list of tool descriptors for GLM (built once at import).
 TOOL_SCHEMAS = tool_schemas()
+TOOL_MANIFESTS = tool_manifests()
 
-__all__ = ["TOOLS", "TOOL_SCHEMAS", "tool", "tool_schemas", "execute_tool"]
+__all__ = [
+    "TOOLS",
+    "TOOL_MANIFESTS",
+    "TOOL_SCHEMAS",
+    "execute_tool",
+    "tool",
+    "tool_manifests",
+    "tool_schemas",
+]

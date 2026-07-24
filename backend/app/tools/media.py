@@ -7,6 +7,7 @@ dependency surface small and the launch latency low.
 from __future__ import annotations
 
 import logging
+import re
 import urllib.parse
 import webbrowser
 from typing import Any
@@ -29,6 +30,8 @@ _MOOD_PLAYLISTS: dict[str, str] = {
     "party": "PL0l_L_pxm8AhR4X-Wv8tTnILp8qWNaAy1",      # party
     "romantic": "PL64gKj6iYjkefYHpFn5dGT4dYf9a4Oo7x",   # romantic
 }
+
+_YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 def _open(url: str) -> None:
@@ -76,8 +79,51 @@ def _youtube_music_search(query: str, max_results: int = 5) -> list[dict[str, An
     return results
 
 
+def _youtube_video_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    """Search general YouTube videos using the official YouTube Data API."""
+    key = api_manager.api_key("youtube")
+    if not key:
+        return []
+
+    settings = api_manager.settings
+    data = api_manager.get_json(
+        "youtube",
+        "https://www.googleapis.com/youtube/v3/search",
+        params={
+            "key": key,
+            "part": "snippet",
+            "type": "video",
+            "q": query,
+            "maxResults": max(1, min(int(max_results), 10)),
+            "regionCode": settings.youtube_region_code,
+            "safeSearch": "moderate",
+        },
+    )
+
+    results: list[dict[str, Any]] = []
+    for item in data.get("items", []):
+        video_id = item.get("id", {}).get("videoId")
+        snippet = item.get("snippet", {})
+        if not video_id:
+            continue
+        results.append({
+            "title": snippet.get("title", ""),
+            "artist_or_channel": snippet.get("channelTitle", ""),
+            "video_id": video_id,
+            "published_at": snippet.get("publishedAt", ""),
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "thumbnail": (snippet.get("thumbnails", {}).get("medium") or {}).get("url", ""),
+            "provider": "youtube_data_api",
+        })
+    return results
+
+
 def _youtube_music_search_url(query: str) -> str:
     return "https://music.youtube.com/search?q=" + urllib.parse.quote(query)
+
+
+def _youtube_search_url(query: str) -> str:
+    return "https://www.youtube.com/results?search_query=" + urllib.parse.quote(query)
 
 
 def _ytmusicapi_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
@@ -101,6 +147,63 @@ def _ytmusicapi_search(query: str, max_results: int = 5) -> list[dict[str, Any]]
     return normalized
 
 
+def _extract_youtube_video_id(url: str) -> str | None:
+    raw = (url or "").strip()
+    if not raw:
+        return None
+
+    parsed = urllib.parse.urlparse(raw)
+    params = urllib.parse.parse_qs(parsed.query)
+    if params.get("uddg"):
+        return _extract_youtube_video_id(urllib.parse.unquote(params["uddg"][0]))
+
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host == "youtu.be":
+        candidate = parsed.path.strip("/").split("/", 1)[0]
+        return candidate if _YOUTUBE_ID_RE.match(candidate) else None
+
+    if host in {"youtube.com", "music.youtube.com", "m.youtube.com"}:
+        if params.get("v") and _YOUTUBE_ID_RE.match(params["v"][0]):
+            return params["v"][0]
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2 and parts[0] in {"embed", "shorts"} and _YOUTUBE_ID_RE.match(parts[1]):
+            return parts[1]
+
+    return None
+
+
+def _ddg_youtube_video_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    """Find YouTube videos without requiring the YouTube Data API."""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return []
+
+    results: list[dict[str, Any]] = []
+    search_query = f"site:youtube.com/watch {query}"
+    try:
+        with DDGS() as ddgs:
+            for item in ddgs.text(search_query, max_results=max(1, min(int(max_results), 10))):
+                url = item.get("href") or item.get("url") or ""
+                video_id = _extract_youtube_video_id(url)
+                if not video_id:
+                    continue
+                results.append({
+                    "title": item.get("title", ""),
+                    "artist_or_channel": item.get("source", ""),
+                    "video_id": video_id,
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+                    "thumbnail": "",
+                    "provider": "duckduckgo_youtube",
+                })
+                if len(results) >= max_results:
+                    break
+    except Exception as exc:  # noqa: BLE001
+        logger.info("DuckDuckGo YouTube search failed: %s", exc)
+    return results
+
+
 @tool
 def play_youtube(query: str) -> ToolResult:
     """Play a specific YouTube video, song, lecture, or topic in the background.
@@ -110,9 +213,10 @@ def play_youtube(query: str) -> ToolResult:
     if not query or not query.strip():
         return ToolResult(status="error", message="What should I play on YouTube?")
     
-    # We need to get a videoId. Let's use the YouTube Data API search.
+    fallback_url = _youtube_search_url(query)
+
     try:
-        results = _youtube_music_search(query, max_results=1)
+        results = _youtube_video_search(query, max_results=1)
         if results and results[0].get("video_id"):
             video_id = results[0]["video_id"]
             return ToolResult(
@@ -120,10 +224,26 @@ def play_youtube(query: str) -> ToolResult:
                 message=f"Playing {results[0]['title']} in the background.",
                 data={"action": "play_media", "video_id": video_id, "query": query},
             )
-        else:
-            return ToolResult(status="not_found", message=f"Couldn't find any results for '{query}'.")
+        results = _ddg_youtube_video_search(query, max_results=1)
+        if results and results[0].get("video_id"):
+            first = results[0]
+            return ToolResult(
+                status="ok",
+                message=f"Playing {first.get('title') or query} in the background.",
+                data={"action": "play_media", "video_id": first["video_id"], "query": query},
+            )
+
+        return ToolResult(
+            status="not_found",
+            message=f"Couldn't find a playable YouTube result for '{query}'.",
+            data={"suggestion": "open_url", "url": fallback_url, "provider": "browser_fallback"},
+        )
     except Exception as e:
-        return ToolResult(status="error", message=f"Search failed: {e}")
+        return ToolResult(
+            status="not_found",
+            message=f"YouTube search failed: {e}. Opening browser search instead.",
+            data={"suggestion": "open_url", "url": fallback_url, "provider": "browser_fallback"},
+        )
 
 
 @tool
@@ -182,34 +302,34 @@ def search_youtube_music(query: str, max_results: int = 5) -> ToolResult:
             data={"suggestion": "open_url", "url": fallback_url, "provider": "browser_fallback"},
         )
 
-    if not api_manager.is_configured("youtube"):
+    try:
+        if provider_pref != "browser" and api_manager.is_configured("youtube"):
+            results = _youtube_music_search(query, max_results=max_results)
+            if results:
+                return ToolResult(
+                    status="ok",
+                    message=f"Found {len(results)} YouTube Music results for '{query}'.",
+                    data={"results": results, "provider": "youtube_data_api"},
+                )
+
+        results = _ddg_youtube_video_search(query, max_results=max_results)
+        if results:
+            return ToolResult(
+                status="ok",
+                message=f"Found {len(results)} YouTube results for '{query}'.",
+                data={"results": results, "provider": "duckduckgo_youtube"},
+            )
+
         return ToolResult(
             status="not_found",
-            message=(
-                "YOUTUBE_DATA_API_KEY is not configured. I can still open "
-                "YouTube Music search in the browser."
-            ),
-            data={"suggestion": "open_url", "url": fallback_url, "provider": "youtube_music"},
-        )
-
-    try:
-        results = _youtube_music_search(query, max_results=max_results)
-        if not results:
-            return ToolResult(
-                status="not_found",
-                message=f"No YouTube Music results found for '{query}'.",
-                data={"suggestion": "open_url", "url": fallback_url},
-            )
-        return ToolResult(
-            status="ok",
-            message=f"Found {len(results)} YouTube Music results for '{query}'.",
-            data={"results": results, "provider": "youtube_data_api"},
+            message=f"No YouTube Music results found for '{query}'.",
+            data={"suggestion": "open_url", "url": fallback_url, "provider": "browser_fallback"},
         )
     except Exception as e:  # noqa: BLE001
         return ToolResult(
-            status="error",
-            message=f"YouTube Music search failed: {e}",
-            data={"fallback_url": fallback_url},
+            status="not_found",
+            message=f"YouTube Music search failed: {e}. Opening browser search instead.",
+            data={"suggestion": "open_url", "url": fallback_url, "provider": "browser_fallback"},
         )
 
 
@@ -235,7 +355,7 @@ def play_youtube_music(query: str) -> ToolResult:
                     data={"action": "play_media", "video_id": playable["video_id"], "query": query},
                 )
 
-        if provider_pref != "ytmusicapi" and api_manager.is_configured("youtube"):
+        if provider_pref not in {"ytmusicapi", "browser"} and api_manager.is_configured("youtube"):
             results = _youtube_music_search(query, max_results=1)
             if results and results[0].get("video_id"):
                 first = results[0]
@@ -245,12 +365,34 @@ def play_youtube_music(query: str) -> ToolResult:
                     data={"action": "play_media", "video_id": first["video_id"], "query": query},
                 )
 
+        results = _ddg_youtube_video_search(f"{query} song music", max_results=1)
+        if results and results[0].get("video_id"):
+            first = results[0]
+            return ToolResult(
+                status="ok",
+                message=f"Playing {first.get('title') or query} in the background.",
+                data={"action": "play_media", "video_id": first["video_id"], "query": query},
+            )
+
         return ToolResult(
             status="not_found",
             message=f"Could not find any playable results for '{query}'.",
+            data={
+                "suggestion": "open_url",
+                "url": _youtube_music_search_url(query),
+                "provider": "browser_fallback",
+            },
         )
     except Exception as e:  # noqa: BLE001
-        return ToolResult(status="error", message=f"Couldn't play YouTube Music: {e}")
+        return ToolResult(
+            status="not_found",
+            message=f"Couldn't play YouTube Music: {e}. Opening browser search instead.",
+            data={
+                "suggestion": "open_url",
+                "url": _youtube_music_search_url(query),
+                "provider": "browser_fallback",
+            },
+        )
 
 @tool
 def stop_music() -> ToolResult:

@@ -17,7 +17,7 @@ Follow these steps in order. The whole setup takes about 5–10 minutes on a nor
 
 ## Step 1 — Get your API keys
 
-1. Go to [Google AI Studio](https://aistudio.google.com/) → sign in → **Get API key** → create and copy your key.
+1. Choose a cloud LLM key: Google AI Studio for Gemini, or the xAI Console for Grok.
 2. Optionally get a **YouTube Data API key** from Google Cloud Console. Genie uses it for official YouTube Music metadata, then opens playback on `music.youtube.com`.
 3. Optionally set up **Google Custom Search JSON API** plus a Programmable Search Engine CX ID for official web search.
 4. Optionally get **NewsAPI**, **GNews**, and/or **TheNewsAPI** keys for official news providers. Genie falls back to RSS/DuckDuckGo if you leave these blank.
@@ -36,9 +36,15 @@ copy .env.example .env
 Open `backend\.env` in any editor and fill in:
 
 ```env
+LLM_PROVIDER=gemini
 GEMINI_API_KEY=your-gemini-key-here
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 GEMINI_MODEL=gemini-2.5-flash
+
+# To use Grok instead:
+# LLM_PROVIDER=grok
+# XAI_API_KEY=your-xai-key-here
+# GROK_MODEL=grok-4.5
 
 # Optional but strongly recommended:
 NGROK_AUTHTOKEN=your-ngrok-token-here
@@ -174,7 +180,7 @@ def my_new_tool(param: str) -> ToolResult:
 
 | Problem | Fix |
 |---|---|
-| `GEMINI_API_KEY is not set` | Fill in `GEMINI_API_KEY` in `backend/.env` |
+| Cloud LLM key is not set | Fill in `GEMINI_API_KEY`, or set `LLM_PROVIDER=grok` with `XAI_API_KEY` |
 | `faster-whisper` model not found | It auto-downloads on first run; wait for the download |
 | Volume control error | Run the backend as Administrator (pycaw needs COM access) |
 | `pyngrok` tunnel failed | Check your `NGROK_AUTHTOKEN` in `.env` |
@@ -188,9 +194,18 @@ def my_new_tool(param: str) -> ToolResult:
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | *(required)* | Your Gemini API key from Google AI Studio |
+| `LLM_PROVIDER` | `gemini` | Cloud model provider: `gemini`, `grok`/`xai`, or `groq` |
+| `GEMINI_API_KEY` | *(required for Gemini)* | Your Gemini API key from Google AI Studio |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | Gemini OpenAI-compatible endpoint |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Model name |
+| `XAI_API_KEY` | *(required for Grok)* | xAI API key for Grok |
+| `GROK_API_KEY` | *(empty)* | Optional alias for `XAI_API_KEY` |
+| `GROK_BASE_URL` | `https://api.x.ai/v1` | xAI OpenAI-compatible endpoint |
+| `GROK_MODEL` | `grok-4.5` | Grok model name |
+| `GROQ_API_KEY` | *(required for Groq Cloud)* | Groq Cloud API key if `LLM_PROVIDER=groq` |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq Cloud model name |
+
+Note the spelling: `grok` is xAI/Grok, while `groq` is Groq Cloud.
 
 | `STT_ENGINE` | `faster_whisper` | `faster_whisper` or `whisper_api` |
 | `WHISPER_MODEL_SIZE` | `small` | `tiny/base/small/medium/large-v3` |

@@ -36,15 +36,20 @@ cp .env.example .env
 
 2. Edit `backend/.env` and add your API keys:
 ```bash
-# Required
+# Default cloud LLM
+LLM_PROVIDER=gemini
 GEMINI_API_KEY=your_gemini_api_key_here
+
+# Or use Grok instead
+# LLM_PROVIDER=grok
+# XAI_API_KEY=your_xai_api_key_here
 
 # Optional (for enhanced features)
 ELEVENLABS_API_KEY=your_key_here
 NEWS_API_KEY=your_key_here
 ```
 
-Get your Gemini API key: https://aistudio.google.com/app/apikey
+Get a Gemini key from https://aistudio.google.com/app/apikey or a Grok key from https://console.x.ai/
 
 ---
 

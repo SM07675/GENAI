@@ -92,6 +92,9 @@ def search_web(query: str, max_results: int = 5) -> ToolResult:
         except Exception as e:  # noqa: BLE001
             logger.info("Google CSE failed, falling back to DuckDuckGo: %s", e)
 
+    ddg_error = ""
+
+    # Try ddgs package first (newer, more reliable)
     try:
         from ddgs import DDGS
 
@@ -102,21 +105,63 @@ def search_web(query: str, max_results: int = 5) -> ToolResult:
                     "title": item.get("title", ""),
                     "url": item.get("href", ""),
                     "body": item.get("body", ""),
+                    "source": "DuckDuckGo",
                 })
 
-        if not results:
-            return ToolResult(status="not_found", message=f"No results found for '{query}'.")
-
-        return ToolResult(
-            status="ok",
-            message=f"Found {len(results)} search results.",
-            data={"results": results, "provider": "duckduckgo"},
-        )
+        if results:
+            return ToolResult(
+                status="ok",
+                message=f"Found {len(results)} search results.",
+                data={"results": results, "provider": "duckduckgo"},
+            )
     except ImportError:
-        return ToolResult(status="error", message="The ddgs package is not installed.")
+        logger.info("ddgs package is unavailable, trying duckduckgo_search.")
     except Exception as e:  # noqa: BLE001
-        logger.error("Web search failed: %s", e)
+        ddg_error = str(e)
+        logger.info("ddgs search failed: %s. Trying duckduckgo_search.", e)
+
+    # Try the older duckduckgo_search package as secondary
+    try:
+        from duckduckgo_search import DDGS as DDGSold
+
+        results = []
+        with DDGSold() as ddgs:
+            for item in ddgs.text(query, max_results=max_results):
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("href", ""),
+                    "body": item.get("body", ""),
+                    "source": "DuckDuckGo",
+                })
+
+        if results:
+            return ToolResult(
+                status="ok",
+                message=f"Found {len(results)} search results.",
+                data={"results": results, "provider": "duckduckgo"},
+            )
+    except ImportError:
+        logger.info("duckduckgo_search also unavailable, using HTML fallback.")
+    except Exception as e:  # noqa: BLE001
+        ddg_error = str(e)
+        logger.info("duckduckgo_search also failed: %s. Using HTML fallback.", e)
+
+    try:
+        results = _duckduckgo_html_search(query, max_results=max_results)
+        if results:
+            return ToolResult(
+                status="ok",
+                message=f"Found {len(results)} search results.",
+                data={"results": results, "provider": "duckduckgo_html"},
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.error("DuckDuckGo HTML search failed: %s", e)
+        if ddg_error:
+            return ToolResult(status="error", message=f"Search failed: {ddg_error}; fallback failed: {e}")
         return ToolResult(status="error", message=f"Search failed: {e}")
+
+    return ToolResult(status="not_found", message=f"No results found for '{query}'.")
+
 
 
 @tool
@@ -437,7 +482,84 @@ def _ddg_news_articles(topic: str, max_results: int) -> list[dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.info("DuckDuckGo news endpoint failed: %s", exc)
 
-    return []
+    try:
+        fallback_results = _duckduckgo_html_search(f"{topic} news", max_results=max_results)
+        return [
+            {
+                "title": item.get("title", ""),
+                "source": item.get("source") or "DuckDuckGo Search",
+                "description": item.get("body", ""),
+                "url": item.get("url", ""),
+                "image_url": "",
+                "published_at": "",
+                "provider": "DuckDuckGo Search",
+            }
+            for item in fallback_results
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.info("DuckDuckGo news search fallback failed: %s", exc)
+        return []
+
+
+def _duckduckgo_html_search(query: str, max_results: int) -> list[dict[str, Any]]:
+    url = "https://html.duckduckgo.com/html/"
+    html_text = api_manager.get_text(
+        "duckduckgo",
+        url,
+        params={"q": query},
+        headers={"User-Agent": "Genie/1.0"},
+    )
+    return _parse_duckduckgo_html_results(html_text, max_results=max_results)
+
+
+def _parse_duckduckgo_html_results(html_text: str, max_results: int) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    link_re = re.compile(
+        r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(link_re.finditer(html_text or ""))
+    for index, match in enumerate(matches):
+        href = _decode_duckduckgo_url(html.unescape(match.group(1)))
+        title = _strip_html(match.group(2))
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else start + 1200
+        block = html_text[start:end]
+        snippet_match = re.search(
+            r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)<(?:/div|/a)>',
+            block,
+            re.IGNORECASE | re.DOTALL,
+        )
+        body = _strip_html(snippet_match.group(1)) if snippet_match else ""
+        if title and href:
+            results.append({
+                "title": title,
+                "url": href,
+                "body": body,
+                "source": _source_from_url(href),
+            })
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _decode_duckduckgo_url(url: str) -> str:
+    raw = (url or "").strip()
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    elif raw.startswith("/"):
+        raw = "https://duckduckgo.com" + raw
+
+    parsed = urllib.parse.urlparse(raw)
+    params = urllib.parse.parse_qs(parsed.query)
+    if params.get("uddg"):
+        return urllib.parse.unquote(params["uddg"][0])
+    return raw
+
+
+def _source_from_url(url: str) -> str:
+    host = urllib.parse.urlparse(url).hostname or ""
+    return host.removeprefix("www.") or "Web"
 
 
 def _normalize_article(article: dict[str, Any], provider: str) -> dict[str, Any]:

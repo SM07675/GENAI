@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -29,16 +30,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from . import ngrok_tunnel, orchestrator
+from . import llm_client, ngrok_tunnel, orchestrator
 from .api.external import router as external_api_router
 from .api.music import router as music_api_router
+from .api.mobile import router as mobile_api_router
 from .auth import Session, get_session, issue_token, verify_pin
 from .config import get_settings
+from .os import get_kernel
 from .schemas import WSIn
 # Importing tools registers them via the @tool decorator side effect.
-from .tools import TOOL_SCHEMAS  # noqa: F401
+from .tools import TOOL_MANIFESTS, TOOL_SCHEMAS  # noqa: F401
+# Conversation Engine (Genie v2) — now uses VoicePipeline
+from .engine import get_voice_pipeline
+# Health check
+from .services.health_check import run_startup_health_check
 
 settings = get_settings()
+kernel = get_kernel()
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 # Use structlog with a processor chain. In dev the renderer is pretty-printed;
@@ -70,18 +78,27 @@ logging.basicConfig(
 
 log = structlog.get_logger("genie.main")
 
-# ── Per-session token bucket ──────────────────────────────────────────────────
+# #region debug-point B:websocket-events
+def _debug_ws_event(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
+    pass
+# #endregion
+
+# ── Per-session token bucket (H9 fix: deque instead of list for O(1) eviction) ─
+from collections import deque as _deque
+
 _SESSION_RATE_LIMIT_RPM = 20     # max turns per minute per session
-_SESSION_BUCKET: dict[str, list[float]] = {}   # session_id -> list of timestamps
+_SESSION_BUCKET: dict[str, _deque[float]] = {}   # session_id -> deque of timestamps
 
 
 def _session_allow_request(session_id: str) -> tuple[bool, int]:
     """Token-bucket check. Returns (allowed, retry_after_seconds)."""
     now    = time.time()
-    bucket = _SESSION_BUCKET.setdefault(session_id, [])
-    # Evict timestamps older than 60 s
+    if session_id not in _SESSION_BUCKET:
+        _SESSION_BUCKET[session_id] = _deque()
+    bucket = _SESSION_BUCKET[session_id]
+    # Evict timestamps older than 60 s — O(1) with deque.popleft()
     while bucket and now - bucket[0] > 60:
-        bucket.pop(0)
+        bucket.popleft()
     if len(bucket) >= _SESSION_RATE_LIMIT_RPM:
         oldest      = bucket[0]
         retry_after = int(60.0 - (now - oldest)) + 1
@@ -99,6 +116,21 @@ async def lifespan(app: FastAPI):
         log.info("ngrok_tunnel_started", url=public_url)
     log.info("genie_pin", pin=settings.effective_pin)
 
+    provider = llm_client.get_provider_config(settings)
+    log.info(
+        "llm_provider_configured",
+        provider=provider.id,
+        label=provider.label,
+        model=provider.model,
+        base_url=provider.base_url,
+        api_key_configured=bool(provider.api_key),
+    )
+    if provider.id == "groq":
+        log.warning(
+            "llm_provider_groq_cloud_selected",
+            note="LLM_PROVIDER=groq means Groq Cloud. Use LLM_PROVIDER=grok for xAI/Grok.",
+        )
+
     # Eagerly load the offline local LLM so it's instantly ready.
     from .services.local_llm import local_llm
     if local_llm.is_enabled(settings):
@@ -109,44 +141,66 @@ async def lifespan(app: FastAPI):
         else:
             log.warning("local_llm_failed", error=local_llm.load_error)
 
-    # Start wake word detection if enabled.
-    wake_detector = None
-    if settings.wake_word_enabled:
+    # Always initialise the websocket registry — wake word callback needs it
+    # regardless of whether the wake word engine starts successfully.
+    if not hasattr(app.state, "active_websockets"):
+        app.state.active_websockets = set()
+
+    # Run startup health check (lightweight — no PyAudio, avoids mic conflict)
+    log.info("running_startup_health_check")
+    health_passed = await run_startup_health_check(settings)
+    if not health_passed:
+        log.warning("health_check_failed_critical", note="Voice system may not function properly")
+    app.state.health_check_passed = health_passed
+
+    # Initialize the voice pipeline (opens mic, starts workers)
+    pipeline = get_voice_pipeline()
+    await pipeline.start()
+    app.state.engine = pipeline
+    log.info("voice_pipeline_started")
+
+    # Initialize TTS model on startup in the background so it doesn't block the server
+    from .tts import init_tts_model
+    log.info("tts_initializing_in_background")
+
+    # M8 fix: monitor the TTS init task for errors instead of fire-and-forget
+    async def _tts_init_with_error_handling():
         try:
-            from .wake_word import WakeWordDetector
+            await asyncio.to_thread(init_tts_model)
+            log.info("tts_model_loaded_successfully")
+        except Exception as e:
+            log.error("tts_model_init_failed", error=str(e))
+            # TTS will gracefully fail on first real call — no crash
 
-            loop = asyncio.get_running_loop()
-            app.state.active_websockets = set()
+    app.state.tts_init_task = asyncio.create_task(_tts_init_with_error_handling())
 
-            def on_wake_word() -> None:
-                log.info("wake_word_detected")
-                for ws_client in list(app.state.active_websockets):
-                    asyncio.run_coroutine_threadsafe(
-                        ws_client.send_text(json.dumps({"type": "wake_word_detected"})),
-                        loop,
+    # Periodic cleanup task: clean expired sessions & conversation contexts every 30 min
+    async def _periodic_cleanup():
+        from .auth import cleanup_expired_sessions
+        from .engine.brain.context import context_store
+        while True:
+            await asyncio.sleep(30 * 60)  # every 30 minutes
+            try:
+                sessions_cleaned = cleanup_expired_sessions(settings)
+                contexts_cleaned = context_store.cleanup_old_sessions(max_age_hours=24)
+                if sessions_cleaned or contexts_cleaned:
+                    log.info(
+                        "periodic_cleanup",
+                        sessions=sessions_cleaned,
+                        contexts=contexts_cleaned,
                     )
+            except Exception as e:
+                log.warning("periodic_cleanup_error", error=str(e))
 
-            wake_detector = WakeWordDetector(
-                callback=on_wake_word,
-                engine=settings.wake_word_engine,
-                keywords=settings.wake_word_keywords,
-            )
-            wake_detector.start()
-            app.state.wake_detector = wake_detector
-            log.info("wake_word_enabled", keywords=settings.wake_word_keywords)
-
-        except ImportError as e:
-            log.warning("wake_word_import_failed", error=str(e))
-        except OSError as e:
-            log.warning("wake_word_audio_failed", error=str(e))
-        except RuntimeError as e:
-            log.warning("wake_word_start_failed", error=str(e))
+    app.state.cleanup_task = asyncio.create_task(_periodic_cleanup())
 
     yield
 
     # Cleanup
-    if wake_detector:
-        wake_detector.stop()
+    if hasattr(app.state, "cleanup_task"):
+        app.state.cleanup_task.cancel()
+    if hasattr(app.state, "engine"):
+        await app.state.engine.stop()
     ngrok_tunnel.stop_tunnel()
     log.info("genie_shutdown")
 
@@ -164,6 +218,7 @@ app.add_middleware(
 
 app.include_router(external_api_router, prefix="/api/v1")
 app.include_router(music_api_router, prefix="/api/v1")
+app.include_router(mobile_api_router, prefix="/api/v1")
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
@@ -190,6 +245,131 @@ async def info() -> dict:
     }
 
 
+@app.get("/api/v1/system/status")
+async def system_status() -> dict:
+    """Genie OS kernel snapshot for migration diagnostics."""
+    snapshot = kernel.snapshot()
+    return {
+        "status": "ok",
+        "kernel": {
+            "recent_task_count": len(snapshot["tasks"]),
+            "recent_event_count": len(snapshot["events"]),
+            "tasks": snapshot["tasks"],
+            "events": snapshot["events"],
+            "permissions": snapshot["permissions"],
+        },
+    }
+
+
+@app.get("/api/v1/tasks")
+async def list_tasks(limit: int = 25) -> dict:
+    """Recent Genie OS tasks."""
+    return {
+        "status": "ok",
+        "tasks": [task.to_dict() for task in kernel.tasks.recent(limit)],
+    }
+
+
+@app.get("/api/v1/tasks/{task_id}")
+async def get_task(task_id: str) -> JSONResponse:
+    """Task detail with events and checkpoints."""
+    task = kernel.tasks.get(task_id)
+    if task is None:
+        return JSONResponse({"error": "task_not_found", "task_id": task_id}, status_code=404)
+    return JSONResponse({
+        "status": "ok",
+        "task": task.to_dict(),
+        "events": [event.to_dict() for event in kernel.events.for_task(task_id)],
+        "checkpoints": [item.to_dict() for item in kernel.checkpoints.for_task(task_id)],
+    })
+
+
+@app.post("/api/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str) -> JSONResponse:
+    """Cancel a tracked task from an OS client."""
+    task = kernel.cancel_task(task_id, "api_cancelled")
+    if task is None:
+        return JSONResponse({"error": "task_not_found", "task_id": task_id}, status_code=404)
+    return JSONResponse({"status": "ok", "task": task.to_dict()})
+
+
+@app.get("/api/v1/context/snapshot")
+async def context_snapshot() -> dict:
+    """Current structured desktop/user context."""
+    from .core.context.engine import context_engine
+
+    return {"status": "ok", "context": context_engine.snapshot()}
+
+
+@app.get("/api/v1/memory/search")
+async def memory_search(q: str = "", limit: int = 8) -> dict:
+    """Search durable local companion memory."""
+    from .tools.memory_db import companion_db
+
+    query = (q or "").strip()
+    results = companion_db.search_memory(query, limit=limit) if query else companion_db.get_memory(limit=limit)
+    return {"status": "ok", "query": query, "results": results}
+
+
+@app.get("/api/v1/tools")
+async def list_tools() -> dict:
+    """Registered tool manifests with runtime policy metadata."""
+    return {"status": "ok", "tools": TOOL_MANIFESTS}
+
+
+@app.post("/api/v1/tools/{tool_name}/invoke")
+async def invoke_tool(tool_name: str, payload: dict) -> JSONResponse:
+    """Invoke a registered tool through the OS permission boundary."""
+    from .os.permissions import CONFIRMATION_LEVELS
+    from .tools import execute_tool
+    from .tools.registry import REGISTRY
+
+    entry = REGISTRY.get(tool_name)
+    if entry is None:
+        return JSONResponse({"error": "tool_not_found", "tool": tool_name}, status_code=404)
+
+    arguments = (payload or {}).get("arguments") or {}
+    task_id = (payload or {}).get("task_id")
+    if entry.side_effect_level in CONFIRMATION_LEVELS:
+        request = kernel.request_permission(
+            risk=entry.side_effect_level,
+            description=f"Allow Genie to run {tool_name}",
+            source="tool.api",
+            task_id=task_id,
+            payload={"tool": tool_name, "arguments": arguments},
+        )
+        return JSONResponse(
+            {
+                "status": "permission_required",
+                "permission": request.to_dict(),
+            },
+            status_code=202,
+        )
+
+    result = await asyncio.to_thread(execute_tool, tool_name, arguments)
+    return JSONResponse({"status": "ok", "result": result.model_dump()})
+
+
+@app.get("/api/v1/permissions/pending")
+async def pending_permissions() -> dict:
+    """Pending permission requests for the local user."""
+    return {
+        "status": "ok",
+        "permissions": [request.to_dict() for request in kernel.permissions.pending()],
+    }
+
+
+@app.post("/api/v1/permissions/{request_id}")
+async def decide_permission(request_id: str, payload: dict) -> JSONResponse:
+    """Approve or deny a pending permission request."""
+    approved = bool((payload or {}).get("approved"))
+    reason = str((payload or {}).get("reason") or "")
+    request = kernel.decide_permission(request_id, approved=approved, reason=reason)
+    if request is None:
+        return JSONResponse({"error": "permission_not_found", "request_id": request_id}, status_code=404)
+    return JSONResponse({"status": "ok", "permission": request.to_dict()})
+
+
 @app.post("/chat")
 async def rest_chat(payload: dict) -> JSONResponse:
     """Synchronous one-shot chat (no streaming). Returns the spoken reply."""
@@ -206,9 +386,28 @@ async def rest_chat(payload: dict) -> JSONResponse:
         if msg["type"] == "assistant_text" and msg.get("delta"):
             captured.append(msg)
 
-    await orchestrator.handle_user_turn(session, text, emit, settings)
+    task = kernel.begin_user_turn(
+        session_id=session.session_id,
+        input_text=text,
+        source="gateway.rest",
+    )
+    try:
+        await orchestrator.handle_user_turn(session, text, emit, settings)
+    except asyncio.CancelledError:
+        kernel.cancel_task(task.task_id, "rest_turn_cancelled")
+        raise
+    except Exception as exc:
+        kernel.fail_task(task.task_id, f"{type(exc).__name__}: {exc}")
+        raise
+
     reply = "".join(m["delta"] for m in captured).strip()
-    return JSONResponse({"reply": reply, "session_id": session.session_id})
+    kernel.complete_task(task.task_id, {"reply_length": len(reply)})
+    return JSONResponse({
+        "reply": reply,
+        "session_id": session.session_id,
+        "task_id": task.task_id,
+        "trace_id": task.trace_id,
+    })
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
@@ -216,8 +415,8 @@ async def rest_chat(payload: dict) -> JSONResponse:
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     session: Optional[Session] = None
-    audio_buffer: bytearray    = bytearray()
     current_task: Optional[asyncio.Task] = None
+    in_flight_request_text: Optional[str] = None
 
     async def emit(msg: dict) -> None:
         """Send a JSON protocol message to the client; swallow send errors."""
@@ -232,12 +431,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect(message.get("code", 1000))
 
-            # ── Binary audio frame ────────────────────────────────────────────
-            if "bytes" in message and message["bytes"] is not None:
-                if session is None:
-                    continue  # ignore audio until authenticated
-                audio_buffer.extend(message["bytes"])
-                continue
+
 
             # ── Text (JSON) frame ─────────────────────────────────────────────
             raw = message.get("text")
@@ -279,6 +473,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 session = issue_token()
                 if hasattr(app.state, "active_websockets"):
                     app.state.active_websockets.add(ws)
+                _debug_ws_event(
+                    "B",
+                    "main.py:websocket:auth_ok",
+                    "websocket authenticated",
+                    {"session_id": session.session_id},
+                )
                 await emit({
                     "type":       "auth_ok",
                     "token":      session.token,
@@ -287,6 +487,11 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 url = ngrok_tunnel.get_public_url()
                 if url:
                     await emit({"type": "public_url", "url": url})
+                    
+                # Bind session to conversation engine
+                if hasattr(app.state, "engine"):
+                    app.state.engine.set_session(session, emit)
+                    
                 continue
 
             # Everything below requires an authenticated session.
@@ -313,7 +518,22 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             if mtype == "cancel":
                 if current_task and not current_task.done():
                     current_task.cancel()
-                await emit({"type": "orb_state", "state": "idle"})
+                _debug_ws_event(
+                    "B",
+                    "main.py:websocket:cancel",
+                    "cancel received",
+                    {
+                        "session_id": session.session_id,
+                        "had_current_task": bool(current_task and not current_task.done()),
+                    },
+                )
+                if hasattr(app.state, "engine"):
+                    await app.state.engine.on_cancel()
+                continue
+
+            if mtype == "manual_wake":
+                if hasattr(app.state, "engine"):
+                    await app.state.engine.on_manual_wake()
                 continue
 
             # ── Text turn ─────────────────────────────────────────────────────
@@ -322,42 +542,36 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 if not user_text:
                     continue
                 if current_task and not current_task.done():
+                    if in_flight_request_text == user_text:
+                        log.debug("deduplicated_text_request", text=user_text)
+                        continue
                     current_task.cancel()
-                current_task = asyncio.create_task(
-                    orchestrator.handle_user_turn(session, user_text, emit, settings)
-                )
+                in_flight_request_text = user_text
+
+                # Use engine for text turns now
+                if hasattr(app.state, "engine"):
+                    await app.state.engine.on_text_input(user_text)
                 continue
 
-            # ── End of audio -> transcribe -> turn ────────────────────────────
-            if mtype == "audio_end":
-                audio_bytes = bytes(audio_buffer)
-                audio_buffer.clear()
-                if not audio_bytes:
-                    continue
-                await emit({"type": "orb_state", "state": "listening"})
-                from . import stt
-                transcript = await stt.transcribe(audio_bytes, settings)
-                if not transcript:
-                    await emit({
-                        "type":    "error",
-                        "message": "I didn't catch any speech. Please try again.",
-                        "code":    "empty_transcript",
-                    })
-                    await emit({"type": "orb_state", "state": "idle"})
-                    continue
-                await emit({"type": "transcript", "text": transcript})
-                if current_task and not current_task.done():
-                    current_task.cancel()
-                current_task = asyncio.create_task(
-                    orchestrator.handle_user_turn(session, transcript, emit, settings)
-                )
-                continue
+
 
             # ── Confirm (for future Phase 2 tool confirmation gate) ───────────
             if mtype == "confirm":
                 # Phase 2 will implement the confirmation flow.
                 # For now, acknowledge receipt.
                 log.debug("confirm_received", confirmed=msg_in.confirmed)
+                continue
+
+            # ── Playback Complete (triggers follow-up listening) ──────────────
+            if mtype == "playback_complete":
+                _debug_ws_event(
+                    "E",
+                    "main.py:websocket:playback_complete",
+                    "frontend playback complete",
+                    {"session_id": session.session_id},
+                )
+                if hasattr(app.state, "engine"):
+                    await app.state.engine.on_playback_complete()
                 continue
 
     except WebSocketDisconnect:

@@ -20,13 +20,15 @@ server -> client:
     {"type": "assistant_audio_end"}
     {"type": "tool_start",  "name": "open_app", "args": {...}}
     {"type": "tool_end",    "name": "open_app", "result": {...}}
-    {"type": "orb_state",   "state": "idle|listening|thinking|speaking"}
+    {"type": "voice_state", "state": "idle|wake_listening|active_listening|processing|speaking|follow_up_listening|interrupted"}
     {"type": "error",       "message": "...", "code": "optional_error_code"}
     {"type": "pong"}                     # response to client heartbeat
     {"type": "wake_word_detected"}       # server-side wake word fired
     {"type": "confirm_required",         # user must confirm before tool runs
               "tool": "...",
               "description": "..."}
+    {"type": "tts_playing"}             # TTS audio started — client mutes mic
+    {"type": "tts_done"}                 # TTS audio ended — client re-enables mic
     {"type": "rate_limited",             # per-session rate limit hit
               "message": "...",
               "retry_after_seconds": 5}
@@ -43,7 +45,7 @@ OrbState = Literal["idle", "listening", "thinking", "speaking"]
 
 class WSIn(BaseModel):
     """Validated inbound JSON message. Binary audio uses raw frames instead."""
-    type: Literal["hello", "text", "audio_end", "cancel", "heartbeat", "confirm"]
+    type: Literal["hello", "text", "audio_end", "cancel", "heartbeat", "confirm", "playback_complete", "manual_wake", "barge_in"]
     pin: Optional[str] = None
     text: Optional[str] = None
     confirmed: Optional[bool] = None  # for "confirm" messages

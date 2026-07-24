@@ -74,3 +74,20 @@ def session_by_id(session_id: str) -> Optional[Session]:
         if s.session_id == session_id:
             return s
     return None
+
+
+def cleanup_expired_sessions(settings: Settings | None = None) -> int:
+    """Remove all expired sessions from the store.
+    
+    Returns the number of sessions cleaned up.
+    Called periodically from the lifespan cleanup task (H8 fix).
+    """
+    settings = settings or get_settings()
+    ttl = settings.session_token_ttl_seconds
+    expired_tokens = [
+        token for token, session in SESSIONS.items()
+        if session.expired(ttl)
+    ]
+    for token in expired_tokens:
+        del SESSIONS[token]
+    return len(expired_tokens)

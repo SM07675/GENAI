@@ -1,290 +1,461 @@
-// App: the top-level shell.
-//  1. PinGate collects the 4-digit PIN.
-//  2. On submit, useWebSocket opens the socket and sends the hello+PIN frame.
-//  3. On auth_ok, we render the main Genie UI (orb + chat + voice bar).
-//  4. assistant_audio messages are routed to the audio player.
-//
-// Enterprise additions (Phase 1):
-//  - Reconnecting banner: shown when wsStatus === "reconnecting" so the user
-//    knows the backend dropped and Genie is auto-recovering.
-//  - sendConfirm exposed for Phase 2 confirmation flow.
-//
-// One store (Zustand) holds everything; the WS hook is the only writer of
-// connection/transcript state.
-import { useEffect, useState, useCallback } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import PinGate from "./components/PinGate";
-import StatusBar from "./components/StatusBar";
-import SiriOrb from "./components/SiriOrb";
-import ChatPanel from "./components/ChatPanel";
-import VoiceBar from "./components/VoiceBar";
-import BackgroundPlayer from "./components/BackgroundPlayer";
+import React, { useEffect, useRef, useState } from "react";
+import { useAppStore } from "./store/appStore";
+import { useVoicePipeline } from "./hooks/useVoicePipeline";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useAudioPlayer } from "./hooks/useAudioPlayer";
-import { useAppStore, ORB_STATES } from "./store/appStore";
+import GenieFace from "./components/GenieFace/GenieFace";
+import MicrophoneButton from "./components/MicrophoneButton";
+import MinimalControls from "./components/MinimalControls";
+import PinGate from "./components/PinGate";
+import BackgroundPlayer from "./components/BackgroundPlayer";
+import { AnimatePresence, motion } from "framer-motion";
 
-export default function App() {
-  const [pin, setPin] = useState(null);          // null = still on the PIN gate
-  const [authed, setAuthed] = useState(false);
-  const [continuousMode, setContinuousMode] = useState(false); // hands-free mode
-  const [showSettings, setShowSettings] = useState(false);
-  const [wakeWordMode, setWakeWordMode] = useState(false); // wake word listening
-
-  const wsStatus = useAppStore((s) => s.wsStatus);
-  const orbState = useAppStore((s) => s.orbState);
-  const amplitude = useAppStore((s) => s.amplitude);   // published by the mic recorder
-
-  const { sendText, sendAudioChunk, endAudio, cancel: wsCancel, sendConfirm } = useWebSocket(pin);
-  const { queueAudioChunk, stopAudio, isPlaying } = useAudioPlayer();
-
-  const cancel = useCallback(() => {
-    wsCancel();
-    stopAudio();
-  }, [wsCancel, stopAudio]);
-
-  // Auto-reactivate listening in continuous mode after assistant finishes speaking
-  useEffect(() => {
-    if (continuousMode && orbState === ORB_STATES.IDLE && !isPlaying.current) {
-      // Small delay to avoid immediately re-triggering
-      const timer = setTimeout(() => {
-        if (useAppStore.getState().orbState === ORB_STATES.IDLE) {
-          // Signal to VoiceBar that it should auto-start recording
-          useAppStore.setState({ shouldAutoRecord: true });
-        }
-      }, 800);
-      return () => clearTimeout(timer);
-    }
-  }, [continuousMode, orbState, isPlaying]);
-
-  // Watch the store for the auth_ok transition and inbound audio.
-  // We subscribe explicitly so audio playback happens outside React render.
-  useEffect(() => {
-    if (wsStatus === "authed") setAuthed(true);
-    if (wsStatus === "error" && pin && !authed) {
-      // Wrong PIN: bounce back to the gate with an error flash.
-      setAuthed(false);
-    }
-    // If we were authed but the connection dropped, stay on main UI
-    // (the reconnecting banner will show instead of the PIN gate).
-  }, [wsStatus, pin, authed]);
-
-  // Hook the WebSocket's inbound messages to also play assistant_audio_chunk.
-  // We do this by subscribing to the raw ws in the store.
-  useEffect(() => {
-    const ws = useAppStore.getState().ws;
-    if (!ws) return;
-    const original = ws.onmessage;
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg.type === "assistant_audio_chunk" && msg.audio) {
-          queueAudioChunk(msg.audio, msg.mime || "audio/mpeg");
-        } else if (msg.type === "assistant_audio_end") {
-          // The backend signals the end of chunks; the audio queue handles transitioning to idle.
-        } else if (msg.type === "cancel") {
-          stopAudio();
-        }
-      } catch { /* ignore */ }
-      if (original) original(evt);
-    };
-    return () => { if (ws) ws.onmessage = original; };
-  }, [wsStatus, queueAudioChunk, stopAudio]);
-
-  // ---- PIN gate (unauthenticated) --------------------------------------
-  if (!authed) {
-    return (
-      <Shell>
-        <PinGate key={pin ? "retry" : "fresh"} onSubmit={setPin} />
-      </Shell>
-    );
-  }
-
-  // ---- Main Genie UI ----------------------------------------------------
+/* ─── Aurora background ─────────────────────────────────────────────────── */
+function AuroraBackground() {
   return (
-    <Shell>
-      {/* Reconnecting Banner — shown when backend connection drops */}
-      <AnimatePresence>
-        {(wsStatus === "reconnecting" || wsStatus === "disconnected") && authed && (
-          <motion.div
-            initial={{ opacity: 0, y: -30 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -30 }}
-            className="absolute top-0 left-0 right-0 z-50 flex items-center justify-center gap-2 py-1.5 text-xs font-medium"
-            style={{
-              background: "linear-gradient(90deg, rgba(234,179,8,0.15), rgba(234,179,8,0.08))",
-              borderBottom: "1px solid rgba(234,179,8,0.3)",
-            }}
-          >
-            <motion.span
-              animate={{ opacity: [0.4, 1, 0.4] }}
-              transition={{ duration: 1.2, repeat: Infinity }}
-              className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-400"
-            />
-            <span className="text-yellow-300">Reconnecting to Genie…</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <StatusBar 
-        continuousMode={continuousMode}
-        onToggleContinuous={() => setContinuousMode(!continuousMode)}
-        onSettings={() => setShowSettings(!showSettings)}
-      />
-      <BackgroundPlayer />
-      {showSettings && (
-        <motion.div 
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mx-4 mt-2 p-3 glass rounded-2xl text-xs text-gray-400 space-y-2"
-        >
-          <div className="flex items-center justify-between">
-            <span>Continuous Conversation Mode</span>
-            <button
-              onClick={() => setContinuousMode(!continuousMode)}
-              className={`px-3 py-1 rounded-full text-xs transition ${
-                continuousMode 
-                  ? 'bg-neon-cyan text-space-900' 
-                  : 'bg-gray-700 text-gray-300'
-              }`}
-            >
-              {continuousMode ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          <p className="text-[10px] text-gray-500">
-            When enabled, Genie automatically listens after responding (like Alexa/Google)
-          </p>
-          
-          <div className="flex items-center justify-between pt-2 border-t border-white/5">
-            <span>Wake Word Mode (Auto-Listen)</span>
-            <button
-              onClick={() => setWakeWordMode(!wakeWordMode)}
-              className={`px-3 py-1 rounded-full text-xs transition ${
-                wakeWordMode 
-                  ? 'bg-neon-pink text-white' 
-                  : 'bg-gray-700 text-gray-300'
-              }`}
-            >
-              {wakeWordMode ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          <p className="text-[10px] text-gray-500">
-            When enabled, always listens for "Hey Genie" or "Okay Genie" (uses more battery)
-          </p>
-          
-          {wakeWordMode && (
-            <div className="pt-2 border-t border-white/5">
-              <p className="text-[10px] text-neon-cyan mb-1">
-                🎙️ Wake Word Active
-              </p>
-              <p className="text-[9px] text-gray-600">
-                Say: "Hey Genie" or "Okay Genie"
-              </p>
-              <p className="text-[9px] text-gray-600">
-                Check backend console for detection logs
-              </p>
-            </div>
-          )}
-        </motion.div>
-      )}
-      <div className="flex flex-col flex-1 min-h-0">
-        {/* Modern Siri-style orb visualization */}
-        <div className="flex-shrink-0 pt-4 pb-2">
-          <SiriOrb state={orbState} amplitude={amplitude} />
-          <motion.p 
-            className="text-center text-sm font-medium tracking-wide mt-2"
-            animate={{
-              color: orbState === ORB_STATES.LISTENING ? "#22d3ee" :
-                     orbState === ORB_STATES.THINKING ? "#a855f7" :
-                     orbState === ORB_STATES.SPEAKING ? "#ec4899" :
-                     "#6b7280"
-            }}
-            transition={{ duration: 0.3 }}
-          >
-            {labelFor(orbState)}
-          </motion.p>
-          {continuousMode && orbState === ORB_STATES.IDLE && (
-            <motion.p 
-              className="text-center text-[10px] text-neon-cyan mt-1"
-              animate={{ opacity: [0.5, 1, 0.5] }}
-              transition={{ duration: 2, repeat: Infinity }}
-            >
-              Continuous mode active
-            </motion.p>
-          )}
-        </div>
-
-        {/* Chat transcript */}
-        <ChatPanel />
-
-        {/* Text + voice controls */}
-        <VoiceBar
-          sendText={sendText}
-          sendAudioChunk={sendAudioChunk}
-          endAudio={endAudio}
-          cancel={cancel}
-          continuousMode={continuousMode}
-          wakeWordMode={wakeWordMode}
-        />
-      </div>
-    </Shell>
+    <div className="genie-bg fixed inset-0 pointer-events-none" style={{ zIndex: 0 }} />
   );
 }
 
-function labelFor(state) {
-  return {
-    [ORB_STATES.IDLE]: "Ready",
-    [ORB_STATES.LISTENING]: "Listening",
-    [ORB_STATES.THINKING]: "Thinking",
-    [ORB_STATES.SPEAKING]: "Speaking",
-  }[state] || "Ready";
+/* ─── System note toast ─────────────────────────────────────────────────── */
+function SystemNoteToast() {
+  const systemNote = useAppStore((s) => s.systemNote);
+  return (
+    <AnimatePresence>
+      {systemNote && (
+        <motion.div
+          key="system-note"
+          initial={{ opacity: 0, y: 20, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 20, scale: 0.95 }}
+          transition={{ duration: 0.25, ease: 'easeOut' }}
+          className="absolute bottom-36 left-1/2 -translate-x-1/2 z-50 pointer-events-none"
+        >
+          <div
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-medium"
+            style={{
+              background: 'rgba(251,191,36,0.10)',
+              border: '1px solid rgba(251,191,36,0.25)',
+              color: '#fbbf24',
+              backdropFilter: 'blur(16px)',
+              maxWidth: '88vw',
+              boxShadow: '0 4px 20px rgba(251,191,36,0.15)',
+            }}
+          >
+            <span>⚡</span>
+            <span>{systemNote}</span>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 }
 
-// Shell: the outer frameless window chrome with a draggable top region.
-function Shell({ children }) {
+/* ─── Status pill ───────────────────────────────────────────────────────── */
+const STATUS_CONFIG = {
+  sleeping:            { label: 'Say "Hey Genie"', color: '#64748b', pulse: false },
+  waking:              { label: 'Waking up…',       color: '#38bdf8', pulse: true  },
+  idle:                { label: 'Ready',             color: '#64748b', pulse: false },
+  listening:           { label: 'Listening',         color: '#22d3ee', pulse: true  },
+  transcribing:        { label: 'Processing…',       color: '#a78bfa', pulse: true  },
+  thinking:            { label: 'Thinking…',         color: '#c084fc', pulse: true  },
+  executing:           { label: 'Working…',          color: '#f59e0b', pulse: true  },
+  speaking:            { label: 'Speaking',          color: '#34d399', pulse: true  },
+  follow_up_listening: { label: 'Listening…',        color: '#22d3ee', pulse: true  },
+  interrupted:         { label: 'Stopped',           color: '#fb923c', pulse: false },
+  error:               { label: 'Error',             color: '#f87171', pulse: false },
+};
+
+function StatusPill({ state }) {
+  const c = STATUS_CONFIG[state] || STATUS_CONFIG.sleeping;
   return (
     <motion.div
-      className="h-screen w-screen flex flex-col overflow-hidden bg-transparent p-[2px]"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
+      key={state}
+      initial={{ opacity: 0, x: -6 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -6 }}
+      transition={{ duration: 0.2 }}
+      className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+      style={{
+        background: `${c.color}14`,
+        border: `1px solid ${c.color}30`,
+        backdropFilter: 'blur(12px)',
+      }}
     >
-      {/* Outer Cyberpunk Glowing Frame */}
-      <div className="absolute inset-0 pointer-events-none z-50">
-        {/* Glow */}
-        <div className="absolute inset-0 border-[2px] border-neon-cyan opacity-50 blur-[4px] m-1 cyber-panel" />
-        {/* Sharp Border */}
-        <div className="absolute inset-0 border-[2px] border-t-neon-cyan border-b-neon-pink border-l-neon-cyan border-r-neon-purple m-1 cyber-panel" />
-        
-        {/* Decorative corner cutouts & circuit lines (pseudo-elements via HTML) */}
-        <div className="absolute top-0 left-[20%] w-16 h-1 bg-neon-cyan" />
-        <div className="absolute bottom-0 right-[20%] w-16 h-1 bg-neon-pink" />
-        <div className="absolute top-[20%] left-0 w-1 h-16 bg-neon-cyan" />
-        <div className="absolute bottom-[20%] right-0 w-1 h-16 bg-neon-pink" />
-        
-        {/* Grid / Tech details */}
-        <div className="absolute top-2 left-6 text-[8px] font-mono text-neon-cyan opacity-70">SYS_0X44</div>
-        <div className="absolute bottom-2 right-6 text-[8px] font-mono text-neon-pink opacity-70">ONLINE</div>
-      </div>
+      <span className="relative flex items-center justify-center" style={{ width: 7, height: 7 }}>
+        {c.pulse && (
+          <span
+            className="absolute inline-flex h-full w-full rounded-full"
+            style={{ backgroundColor: c.color, opacity: 0.6, animation: 'ping 1.4s cubic-bezier(0,0,0.2,1) infinite' }}
+          />
+        )}
+        <span className="relative inline-flex rounded-full" style={{ width: 5, height: 5, backgroundColor: c.color }} />
+      </span>
+      <span className="text-xs font-semibold tracking-wide" style={{ color: c.color }}>
+        {c.label}
+      </span>
+    </motion.div>
+  );
+}
 
+/* ─── Genie orb avatar ──────────────────────────────────────────────────── */
+function GenieOrb({ state }) {
+  const isSpeaking = state === 'speaking';
+  const isListening = state === 'listening' || state === 'follow_up_listening';
+  const isThinking = ['thinking', 'transcribing', 'executing'].includes(state);
+
+  let glowColor = 'rgba(99,102,241,0.4)';
+  if (isSpeaking)  glowColor = 'rgba(52,211,153,0.5)';
+  if (isListening) glowColor = 'rgba(34,211,238,0.5)';
+  if (isThinking)  glowColor = 'rgba(168,85,247,0.5)';
+
+  return (
+    <motion.div
+      animate={isSpeaking || isListening ? { scale: [1, 1.06, 1] } : { scale: 1 }}
+      transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+      className="relative flex-shrink-0"
+      style={{ width: 36, height: 36 }}
+    >
+      {/* Glow ring */}
+      <motion.div
+        className="absolute inset-0 rounded-full"
+        animate={{ opacity: (isSpeaking || isListening) ? [0.4, 0.8, 0.4] : 0.3 }}
+        transition={{ duration: 1.5, repeat: Infinity }}
+        style={{ background: glowColor, filter: 'blur(8px)', borderRadius: '50%' }}
+      />
+      {/* Orb */}
       <div
-        className="flex-1 flex flex-col cyber-panel bg-[#0a0b1e]/20 overflow-hidden relative"
-        style={{ WebkitAppRegion: "drag" }}
+        className="absolute inset-0 rounded-full flex items-center justify-center"
+        style={{
+          background: 'conic-gradient(from 0deg, #22d3ee, #6366f1, #a855f7, #22d3ee)',
+          boxShadow: `0 0 16px ${glowColor}`,
+        }}
       >
-        <div className="scanlines" />
-        <div className="flex-1 flex flex-col min-h-0 relative z-10 p-2 md:p-3">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key="content"
-              className="flex-1 flex flex-col min-h-0"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
-              {children}
-            </motion.div>
-          </AnimatePresence>
+        <div
+          className="w-full h-full rounded-full flex items-center justify-center"
+          style={{ background: 'rgba(7,11,20,0.4)', fontSize: 14, color: '#fff', fontWeight: 700 }}
+        >
+          G
         </div>
       </div>
     </motion.div>
+  );
+}
+
+/* ─── Chat bubble ───────────────────────────────────────────────────────── */
+function ChatBubble({ role, text, isStreaming }) {
+  const isUser = role === 'user';
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+      className={`flex ${isUser ? 'justify-end' : 'justify-start'} w-full items-end gap-2`}
+    >
+      {!isUser && (
+        <div className="flex-shrink-0 mb-0.5"
+          style={{
+            width: 26, height: 26, borderRadius: '50%',
+            background: 'conic-gradient(from 0deg,#22d3ee,#6366f1,#a855f7,#22d3ee)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 11, fontWeight: 700, color: '#fff',
+            boxShadow: '0 0 12px rgba(99,102,241,0.4)',
+          }}
+        >G</div>
+      )}
+
+      <div
+        className={`max-w-[78%] px-4 py-3 text-sm leading-relaxed ${
+          isUser ? 'rounded-2xl rounded-br-sm' : 'rounded-2xl rounded-bl-sm'
+        } ${isUser ? 'bubble-user' : 'bubble-assistant'}`}
+      >
+        {text}
+        {isStreaming && (
+          <motion.span
+            className="inline-block ml-1"
+            animate={{ opacity: [1, 0, 1] }}
+            transition={{ duration: 0.8, repeat: Infinity }}
+            style={{ color: '#34d399' }}
+          >▋</motion.span>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─── Waveform (speaking) ───────────────────────────────────────────────── */
+function SpeakingWaveform() {
+  const BARS = [0.4, 0.7, 1.0, 0.8, 0.6, 0.9, 0.5, 0.75, 0.45, 0.65];
+  return (
+    <div className="flex items-center justify-center gap-[3px]" style={{ height: 28 }}>
+      {BARS.map((h, i) => (
+        <motion.span
+          key={i}
+          className="rounded-full"
+          style={{
+            width: 3,
+            background: 'linear-gradient(to top, #34d399, #22d3ee)',
+            display: 'inline-block',
+            borderRadius: 99,
+          }}
+          animate={{ height: [3, 8 + h * 18, 3] }}
+          transition={{ duration: 0.55 + h * 0.15, repeat: Infinity, delay: i * 0.07, ease: 'easeInOut' }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ─── Listening dots ────────────────────────────────────────────────────── */
+function ListeningDots() {
+  return (
+    <div className="flex items-center gap-1.5">
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          className="inline-block rounded-full"
+          style={{ width: 6, height: 6, background: '#22d3ee' }}
+          animate={{ y: [0, -5, 0], opacity: [0.4, 1, 0.4] }}
+          transition={{ duration: 0.65, repeat: Infinity, delay: i * 0.16 }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ─── Thinking indicator (in chat) ─────────────────────────────────────── */
+function ThinkingBubble() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      className="flex items-end gap-2"
+    >
+      <div style={{
+        width: 26, height: 26, borderRadius: '50%',
+        background: 'conic-gradient(from 0deg,#22d3ee,#6366f1,#a855f7,#22d3ee)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 11, fontWeight: 700, color: '#fff',
+        flexShrink: 0,
+      }}>G</div>
+      <div
+        className="bubble-assistant px-4 py-3 rounded-2xl rounded-bl-sm flex items-center gap-1.5"
+      >
+        {[0, 1, 2].map((i) => (
+          <motion.span
+            key={i}
+            className="inline-block rounded-full"
+            style={{ width: 6, height: 6, background: '#a78bfa' }}
+            animate={{ y: [0, -4, 0], opacity: [0.3, 1, 0.3] }}
+            transition={{ duration: 0.55, repeat: Infinity, delay: i * 0.14 }}
+          />
+        ))}
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─── Empty state ───────────────────────────────────────────────────────── */
+function EmptyState({ state }) {
+  const messages = {
+    sleeping: { icon: '🌙', title: 'Hey Genie', sub: 'Say "Hey Genie" to start a conversation' },
+    waking:   { icon: '✨', title: 'Hi there!', sub: 'Listening for your command…' },
+    idle:     { icon: '💫', title: 'Ready',     sub: 'Tap the mic or say "Hey Genie"' },
+  };
+  const m = messages[state] || messages.idle;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.5 }}
+      className="flex flex-col items-center justify-center gap-4 py-16 pointer-events-none select-none"
+    >
+      <motion.div
+        animate={{ y: [0, -6, 0] }}
+        transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+        style={{ fontSize: 48 }}
+      >{m.icon}</motion.div>
+      <div className="text-center">
+        <p className="text-lg font-semibold shimmer-text mb-1">{m.title}</p>
+        <p className="text-sm text-slate-500">{m.sub}</p>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─── Main App ──────────────────────────────────────────────────────────── */
+export default function App() {
+  const [pin, setPin] = useState(null);
+  const wsStatus = useAppStore((s) => s.wsStatus);
+  const authed = wsStatus === "authed";
+
+  useEffect(() => {
+    if (wsStatus === "error") setPin(null);
+  }, [wsStatus]);
+
+  const audioRef = useRef(null);
+  const setAssistantAudioElement = useAppStore((s) => s.setAssistantAudioElement);
+
+  useEffect(() => {
+    setAssistantAudioElement(audioRef.current);
+    return () => setAssistantAudioElement(null);
+  }, [setAssistantAudioElement]);
+
+  const { queueAudioChunk, stopAudio, notifyTtsDone } = useAudioPlayer(audioRef);
+  useWebSocket(pin, queueAudioChunk, stopAudio, notifyTtsDone);
+  useVoicePipeline();
+
+  const genieState    = useAppStore((s) => s.genieState);
+  const liveTranscript = useAppStore((s) => s.liveTranscript);
+  const messages      = useAppStore((s) => s.messages);
+  const currentAssistantId = useAppStore((s) => s.currentAssistantId);
+
+  const scrollRef = useRef(null);
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, liveTranscript]);
+
+  const recentMessages = messages.slice(-10);
+  const isSpeaking  = genieState === 'speaking';
+  const isListening = genieState === 'listening' || genieState === 'follow_up_listening';
+  const isThinking  = ['thinking', 'transcribing', 'executing'].includes(genieState);
+  const isActive    = isSpeaking || isListening || isThinking;
+  const hasConversation = recentMessages.length > 0;
+
+  /* ─── PIN gate ─────────────────────────────────── */
+  if (!authed) {
+    return (
+      <div className="relative flex flex-col items-center justify-center h-screen w-screen overflow-hidden">
+        <AuroraBackground />
+        <div className="relative z-10">
+          <MinimalControls />
+          <PinGate key={pin ? "retry" : "fresh"} onSubmit={setPin} />
+        </div>
+      </div>
+    );
+  }
+
+  /* ─── Main UI ──────────────────────────────────── */
+  return (
+    <div className="relative flex flex-col h-screen w-screen overflow-hidden" style={{ zIndex: 1 }}>
+      <AuroraBackground />
+
+      {/* ── TOP BAR ───────────────────────────────── */}
+      <motion.div
+        initial={{ opacity: 0, y: -12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+        className="relative z-20 flex-shrink-0 flex items-center justify-between px-4 pt-4 pb-3"
+        style={{
+          background: 'linear-gradient(to bottom, rgba(7,11,20,0.8) 0%, transparent 100%)',
+        }}
+      >
+        {/* Left: avatar + name + status */}
+        <div className="flex items-center gap-2.5">
+          <GenieOrb state={genieState} />
+          <div className="flex flex-col">
+            <span className="text-sm font-bold shimmer-text leading-none mb-0.5">Genie</span>
+            <AnimatePresence mode="wait">
+              <StatusPill key={genieState} state={genieState} />
+            </AnimatePresence>
+          </div>
+        </div>
+
+        {/* Right: controls */}
+        <MinimalControls embedded />
+      </motion.div>
+
+      {/* ── DIVIDER ───────────────────────────────── */}
+      <div className="relative z-10 flex-shrink-0 mx-4 h-px" style={{ background: 'rgba(255,255,255,0.05)' }} />
+
+      {/* ── CONVERSATION AREA ─────────────────────── */}
+      <div
+        ref={scrollRef}
+        className="relative z-10 flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3"
+        style={{ scrollbarWidth: 'thin' }}
+      >
+        {!hasConversation ? (
+          <div className="flex-1 flex items-center justify-center">
+            <AnimatePresence mode="wait">
+              <EmptyState key={genieState} state={genieState} />
+            </AnimatePresence>
+          </div>
+        ) : (
+          <>
+            {recentMessages.map((msg) => (
+              <ChatBubble
+                key={msg.id}
+                role={msg.role}
+                text={msg.text}
+                isStreaming={msg.id === currentAssistantId && isSpeaking}
+              />
+            ))}
+
+            <AnimatePresence>
+              {isThinking && !currentAssistantId && (
+                <ThinkingBubble key="thinking" />
+              )}
+            </AnimatePresence>
+          </>
+        )}
+      </div>
+
+      {/* ── BOTTOM BAR ────────────────────────────── */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+        className="relative z-20 flex-shrink-0 px-4 pt-2 pb-6"
+        style={{
+          background: 'linear-gradient(to top, rgba(7,11,20,0.95) 0%, rgba(7,11,20,0.6) 60%, transparent 100%)',
+        }}
+      >
+        {/* Live transcript / speaking bar */}
+        <AnimatePresence>
+          {(isListening || (isSpeaking && liveTranscript && liveTranscript.length > 0)) && (
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.97 }}
+              transition={{ duration: 0.22 }}
+              className="mb-3 mx-2 flex items-center gap-3 px-4 py-2.5 rounded-2xl"
+              style={{
+                background: isListening ? 'rgba(34,211,238,0.07)' : 'rgba(52,211,153,0.07)',
+                border: `1px solid ${isListening ? 'rgba(34,211,238,0.18)' : 'rgba(52,211,153,0.18)'}`,
+                backdropFilter: 'blur(16px)',
+                boxShadow: isListening
+                  ? '0 0 20px rgba(34,211,238,0.08)'
+                  : '0 0 20px rgba(52,211,153,0.08)',
+              }}
+            >
+              {isListening ? <ListeningDots /> : <SpeakingWaveform />}
+              <p
+                className="text-sm font-medium flex-1 truncate"
+                style={{ color: isListening ? '#22d3ee' : '#34d399' }}
+              >
+                {isListening
+                  ? (liveTranscript && liveTranscript !== 'Listening...' ? liveTranscript : 'Listening…')
+                  : liveTranscript}
+              </p>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Mic button */}
+        <div className="flex justify-center">
+          <MicrophoneButton />
+        </div>
+      </motion.div>
+
+      {/* ── Extras ────────────────────────────────── */}
+      <audio ref={audioRef} className="hidden" />
+      <SystemNoteToast />
+      <BackgroundPlayer />
+    </div>
   );
 }

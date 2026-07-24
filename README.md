@@ -1,6 +1,6 @@
 # Genie — Personal AI Assistant
 
-> A **local, offline-first** AI assistant that lives on your PC (Electron desktop) and on your phone (via ngrok). Built with Gemini for reasoning, faster-whisper for speech-to-text, and Edge TTS for voice — with zero cloud STT/TTS costs by default.
+> A **local, offline-first** AI assistant that lives on your PC (Electron desktop) and on your phone (via ngrok). Built with a configurable cloud LLM for reasoning, faster-whisper for speech-to-text, and Edge TTS for voice — with zero cloud STT/TTS costs by default.
 
 ## 🆕 New: Alexa/Google Assistant-Style Communication!
 
@@ -34,7 +34,7 @@ Genie now features **natural conversation mode** with:
 | "Toggle night light" | Flips Windows Night Light |
 | "Sleep the PC" | Puts computer to sleep |
 | "Type a leave letter in Notepad" | Ghost-types the full letter |
-| "What's on my screen?" | Gemini vision reads the display |
+| "What's on my screen?" | The active vision-capable model reads the display |
 
 ---
 
@@ -45,7 +45,7 @@ Genie now features **natural conversation mode** with:
 │  Frontend   │ ◄──────────────────── │   FastAPI Backend    │
 │ Electron+   │                        │                      │
 │   React     │  binary audio frames  │  faster-whisper STT  │
-│  (Vite)     │ ──────────────────── ►│  Gemini (ReAct)      │
+│  (Vite)     │ ──────────────────── ►│  LLM provider        │
 │             │  text deltas / audio  │  Edge TTS            │
 │             │ ◄──────────────────── │  Tool executor       │
 └─────────────┘                        └──────────────────────┘
@@ -89,8 +89,8 @@ D:\GENAI\
 │       ├── main.py       ← FastAPI + WebSocket endpoint
 │       ├── config.py     ← pydantic-settings
 │       ├── auth.py       ← PIN + session tokens
-│       ├── orchestrator.py ← Gemini ReAct loop
-│       ├── llm_client.py ← AsyncOpenAI → Gemini
+│       ├── orchestrator.py ← LLM ReAct loop
+│       ├── llm_client.py ← AsyncOpenAI → Gemini/Grok/Groq
 │       ├── stt.py        ← faster-whisper (local, offline)
 │       ├── tts.py        ← Edge TTS + ElevenLabs fallback
 │       ├── ngrok_tunnel.py
@@ -124,7 +124,7 @@ D:\GENAI\
 
 | Layer | Tech |
 |---|---|
-| LLM | Gemini (OpenAI-compatible) |
+| LLM | Gemini, Grok/xAI, or Groq Cloud (OpenAI-compatible) |
 | STT | faster-whisper (local, CUDA/CPU, no API key) |
 | TTS | Edge TTS, ElevenLabs, or Gemini Live native audio |
 | Backend | FastAPI + uvicorn + WebSockets |

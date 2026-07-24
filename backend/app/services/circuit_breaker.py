@@ -54,6 +54,7 @@ class CircuitBreaker:
         self._state: CBState = CBState.CLOSED
         self._failures: int = 0
         self._opened_at: float = 0.0
+        self._current_cooldown: float = cooldown_seconds
 
     # ------------------------------------------------------------------
     # Public interface
@@ -80,10 +81,12 @@ class CircuitBreaker:
             log.info("[%s] Circuit recovering → CLOSED (success probe)", self.name)
         self._failures = 0
         self._state = CBState.CLOSED
+        self._current_cooldown = self.cooldown_seconds
 
     def record_failure(self) -> None:
         """Call after a failed external call; may trip the circuit."""
         self._failures += 1
+        self._current_cooldown = self.cooldown_seconds
         if self._state == CBState.HALF_OPEN:
             # Probe failed → stay open, reset cooldown
             self._state = CBState.OPEN
@@ -99,6 +102,14 @@ class CircuitBreaker:
                 self._failures,
             )
 
+    def force_open(self, cooldown_seconds: float) -> None:
+        """Manually trip the circuit with a specific cooldown (e.g. Retry-After)."""
+        self._state = CBState.OPEN
+        self._opened_at = time.monotonic()
+        self._current_cooldown = cooldown_seconds
+        self._failures = self.failure_threshold
+        log.warning("[%s] Circuit forced OPEN for %s seconds", self.name, cooldown_seconds)
+
     def status_dict(self) -> dict:
         """Serializable status for the /apis/status endpoint."""
         return {
@@ -106,10 +117,10 @@ class CircuitBreaker:
             "state": self.state.value,
             "failures": self._failures,
             "threshold": self.failure_threshold,
-            "cooldown_seconds": self.cooldown_seconds,
+            "cooldown_seconds": self._current_cooldown,
             "seconds_until_probe": max(
                 0,
-                self.cooldown_seconds - (time.monotonic() - self._opened_at)
+                self._current_cooldown - (time.monotonic() - self._opened_at)
             ) if self._state == CBState.OPEN else 0,
         }
 
@@ -120,7 +131,7 @@ class CircuitBreaker:
     def _maybe_transition_to_half_open(self) -> None:
         if self._state == CBState.OPEN:
             elapsed = time.monotonic() - self._opened_at
-            if elapsed >= self.cooldown_seconds:
+            if elapsed >= self._current_cooldown:
                 self._state = CBState.HALF_OPEN
                 log.info(
                     "[%s] Cooldown elapsed → HALF_OPEN (sending probe)",

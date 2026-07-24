@@ -127,17 +127,30 @@ class ConversationContext:
 class ConversationManager:
     """Manages all active conversation contexts."""
 
+    MAX_CONTEXTS = 50  # H7 fix: cap total context count
+
     def __init__(self):
         self.contexts: dict[str, ConversationContext] = {}
 
     def get_context(self, session_id: str) -> ConversationContext:
         """Get or create conversation context for a session."""
         if session_id not in self.contexts:
+            # Auto-cleanup if at capacity
+            if len(self.contexts) >= self.MAX_CONTEXTS:
+                self.cleanup_old_sessions(max_age_hours=1)
+            # If still at capacity after cleanup, evict oldest
+            if len(self.contexts) >= self.MAX_CONTEXTS:
+                oldest_sid = min(
+                    self.contexts,
+                    key=lambda sid: self.contexts[sid].conversation_start,
+                )
+                del self.contexts[oldest_sid]
+                log.info(f"Evicted oldest conversation context: {oldest_sid}")
             self.contexts[session_id] = ConversationContext(session_id)
         return self.contexts[session_id]
 
-    def cleanup_old_sessions(self, max_age_hours: int = 24):
-        """Remove contexts older than max_age_hours."""
+    def cleanup_old_sessions(self, max_age_hours: int = 24) -> int:
+        """Remove contexts older than max_age_hours. Returns count removed."""
         from datetime import timedelta
         now = datetime.now()
         expired = [
@@ -147,6 +160,7 @@ class ConversationManager:
         for sid in expired:
             del self.contexts[sid]
             log.info(f"Cleaned up expired conversation context: {sid}")
+        return len(expired)
 
 
 # Global conversation manager instance

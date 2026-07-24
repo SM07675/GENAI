@@ -30,6 +30,7 @@ from . import tts as tts_module
 from . import stt, llm_client
 from .auth import Session
 from .config import Settings, get_settings
+from .core.context.peak_context import build_peak_context_packet, record_turn_memory
 from .tools import TOOL_SCHEMAS, execute_tool
 
 _stdlib_log = logging.getLogger("genie.orchestrator")
@@ -37,6 +38,7 @@ _stdlib_log = logging.getLogger("genie.orchestrator")
 Emitter = Callable[[dict], Awaitable[None]]
 
 MAX_TOOL_ITERATIONS = 8
+TOOL_RESULT_CONTENT_LIMIT = 12000
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
 _SYSTEM_PROMPT_CACHE: str | None = None
@@ -44,6 +46,29 @@ _SYSTEM_PROMPT_CACHE: str | None = None
 # Keep only the last N user+assistant turns in history.
 # ~6 exchanges — prompt governs how much the model references, not this cap.
 MAX_HISTORY_TURNS = 12
+
+# Wake phrases to strip from the start of user input before sending to LLM
+_WAKE_PHRASES = [
+    "hey genie", "okay genie", "ok genie", "hi genie", "hello genie",
+    "hey genie,", "okay genie,", "ok genie,", "hi genie,", "hello genie,",
+]
+
+
+def _strip_wake_phrase(text: str) -> str:
+    """Remove wake phrase from the start of the user's utterance.
+
+    Examples:
+      'Hey Genie, open YouTube'  → 'open YouTube'
+      'Hey Genie explain AI'     → 'explain AI'
+      'Hey Genie'                → '' (caller must handle empty)
+    """
+    t = text.strip()
+    lower = t.lower()
+    for phrase in _WAKE_PHRASES:
+        if lower.startswith(phrase):
+            t = t[len(phrase):].lstrip(", ").strip()
+            break
+    return t
 
 
 def load_system_prompt() -> str:
@@ -61,12 +86,59 @@ def load_system_prompt() -> str:
 def _trim_history(history: list[dict]) -> list[dict]:
     ua = [m for m in history if m.get("role") in ("user", "assistant")]
     if len(ua) <= MAX_HISTORY_TURNS:
-        return history
-    cutoff_ua = ua[-(MAX_HISTORY_TURNS):]
-    for i, m in enumerate(history):
-        if m is cutoff_ua[0]:
-            return history[i:]
-    return history[-(MAX_HISTORY_TURNS * 3):]
+        trimmed = history
+    else:
+        cutoff_ua = ua[-(MAX_HISTORY_TURNS):]
+        trimmed = history
+        for i, m in enumerate(history):
+            if m is cutoff_ua[0]:
+                trimmed = history[i:]
+                break
+        else:
+            trimmed = history[-(MAX_HISTORY_TURNS * 3):]
+    return _sanitize_history_for_gemini(trimmed)
+
+
+def _sanitize_history_for_gemini(history: list[dict]) -> list[dict]:
+    """Remove orphaned tool_calls/tool messages that cause Gemini 400 errors.
+
+    Gemini requires: tool_call assistant msg → immediately followed by tool response.
+    If a turn was cancelled or interrupted, the assistant tool_call msg may have
+    no matching tool response, causing: 'function call turn comes immediately after
+    a user turn'. This strips any such orphaned pairs from history.
+    """
+    cleaned: list[dict] = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        role = msg.get("role")
+
+        # Assistant message with tool_calls — must be followed by tool responses
+        if role == "assistant" and msg.get("tool_calls"):
+            # Collect all consecutive tool-response messages that follow
+            j = i + 1
+            tool_responses: list[dict] = []
+            while j < len(history) and history[j].get("role") == "tool":
+                tool_responses.append(history[j])
+                j += 1
+
+            if tool_responses:
+                # Valid pair — keep both
+                cleaned.append(msg)
+                cleaned.extend(tool_responses)
+            # else: orphaned tool_call — drop it entirely
+            i = j
+            continue
+
+        # Orphaned standalone tool response (no preceding assistant tool_call)
+        if role == "tool":
+            i += 1
+            continue
+
+        cleaned.append(msg)
+        i += 1
+
+    return cleaned
 
 
 # ── Delivery cue parsing ─────────────────────────────────────────────────────
@@ -95,9 +167,7 @@ def extract_cue(text: str) -> tuple[str, str]:
     cue = "neutral"
     for m in _CUE_RE.finditer(text):
         cue = m.group(1)
-    clean = _CUE_RE.sub("", text).strip()
-    # Collapse any double spaces left behind by cue removal
-    clean = re.sub(r'\s{2,}', ' ', clean)
+    clean = _CUE_RE.sub("", text)
     return cue, clean
 
 
@@ -119,6 +189,68 @@ def _strip_markdown_for_tts(text: str) -> str:
     return s.strip()
 
 
+def _tool_result_content(result: Any) -> str:
+    """Serialize tool output for the next model step.
+
+    The model needs structured result data for web/news summaries and for
+    fallback instructions such as suggestion=open_url. Keep it bounded so a
+    noisy API response cannot balloon the next prompt.
+    """
+    payload = {
+        "status": result.status,
+        "message": result.message,
+        "data": result.data,
+    }
+    try:
+        content = json.dumps(payload, ensure_ascii=False, default=str)
+    except TypeError:
+        content = json.dumps(
+            {"status": result.status, "message": result.message, "data": {}},
+            ensure_ascii=False,
+        )
+    if len(content) > TOOL_RESULT_CONTENT_LIMIT:
+        content = content[:TOOL_RESULT_CONTENT_LIMIT] + "... [truncated]"
+    return content
+
+
+async def _maybe_open_suggested_url(result: Any, emit: Emitter, log: Any = None) -> Any:
+    """Execute a tool-provided open_url fallback when one is explicitly offered."""
+    if result.status != "not_found":
+        return result
+
+    data = result.data or {}
+    if data.get("suggestion") != "open_url" or not data.get("url"):
+        return result
+
+    fallback_args = {"url": str(data["url"])}
+    if log:
+        log.info("tool_fallback_start", tool="open_url", args=fallback_args)
+    await emit({"type": "tool_start", "name": "open_url", "args": fallback_args})
+
+    try:
+        fallback = await asyncio.to_thread(execute_tool, "open_url", fallback_args)
+    except Exception as exc:  # noqa: BLE001
+        from .schemas import ToolResult as TR
+        fallback = TR(status="error", message=f"Fallback open_url failed: {exc}")
+
+    if log:
+        log.info("tool_fallback_end", tool="open_url", status=fallback.status)
+    await emit({"type": "tool_end", "name": "open_url", "result": fallback.model_dump()})
+
+    merged_data = {
+        **data,
+        "fallback_tool": "open_url",
+        "fallback_result": fallback.model_dump(),
+    }
+    if fallback.status == "ok":
+        return result.model_copy(update={
+            "status": "ok",
+            "message": fallback.message,
+            "data": merged_data,
+        })
+    return result.model_copy(update={"data": merged_data})
+
+
 # ── Main turn handler ─────────────────────────────────────────────────────────
 
 async def handle_user_turn(
@@ -126,12 +258,39 @@ async def handle_user_turn(
     user_text: str,
     emit: Emitter,
     settings: Settings | None = None,
+    cancel_token=None,
+    skip_wake_strip: bool = False,
 ) -> None:
-    """Run one full user → assistant turn (possibly many tool calls)."""
+    """Run one full user → assistant turn (possibly many tool calls).
+
+    Args:
+        cancel_token: Optional CancellationToken from the conversation engine.
+                      If set, workers abort at safe checkpoints.
+        skip_wake_strip: If True, skip wake phrase removal (already done by pipeline).
+    """
     settings = settings or get_settings()
     text = (user_text or "").strip()
+
+    # Strip wake phrase (unless the pipeline already did it — audit fix #21)
+    if not skip_wake_strip:
+        text = _strip_wake_phrase(text)
+
     if not text:
-        await emit({"type": "error", "message": "I didn't catch that.", "code": "empty_input"})
+        # User said only "Hey Genie" with nothing after — acknowledge and wait
+        await emit({"type": "assistant_text", "delta": "Yes, I'm listening.", "final": True})
+        ack_audio, ack_mime, _ = await tts_module.synthesize_with_mime("Yes, I'm listening.", settings)
+        if ack_audio:
+            await emit({"type": "orb_state", "state": "speaking"})
+            await emit({"type": "tts_playing"})
+            await emit({
+                "type": "assistant_audio_chunk",
+                "audio": base64.b64encode(ack_audio).decode("ascii"),
+                "mime": ack_mime,
+                "seq": 0,
+            })
+            await emit({"type": "assistant_audio_end"})
+        await emit({"type": "tts_done"})
+        await emit({"type": "orb_state", "state": "idle"})
         return
 
     request_id = secrets.token_hex(6)
@@ -140,19 +299,31 @@ async def handle_user_turn(
         request_id=request_id,
     )
 
+    # Cancellation token — check at safe points to abort if interrupted
+    _cancel = cancel_token
+
     from .conversation_manager import conversation_manager
     context = conversation_manager.get_context(session.session_id)
     resolved_text = context.resolve_references(text)
-
+    
     is_hindi = bool(re.search(r'[\u0900-\u097F]', resolved_text))
     lang_tag = "[Language: Hindi/Hinglish] " if is_hindi else "[Language: English] "
     tagged_text = lang_tag + resolved_text
 
     session.history.append({"role": "user", "content": tagged_text})
+    
+    # Local intent routing is now handled by the engine's IntentAnalyzer.
+    # The orchestrator only handles full LLM-routed turns.
 
     system_prompt = load_system_prompt()
     context_summary = context.get_context_summary()
-    full_prompt = system_prompt + "\n" + context_summary if context_summary else system_prompt
+    peak_context = build_peak_context_packet(resolved_text, session.session_id)
+    full_prompt_parts = [system_prompt]
+    if context_summary:
+        full_prompt_parts.append(context_summary)
+    if peak_context:
+        full_prompt_parts.append(peak_context)
+    full_prompt = "\n\n".join(full_prompt_parts)
 
     messages = [{"role": "system", "content": full_prompt}] + _trim_history(session.history)
 
@@ -169,19 +340,43 @@ async def handle_user_turn(
     current_cue = "neutral"
     sentence_seq = 0
 
+    # Timeout applied only to individual TTS synthesis tasks (not queue.get).
+    # The consumer itself exits via:
+    #   - None sentinel  (normal, line below `await tts_queue.put(None)`)
+    #   - consumer_task.cancel()  (CancelledError / exception paths)
+    # Using a queue.get() timeout caused premature exits when the LLM was slow
+    # (e.g. GGUF fallback taking 37s while the 30s clock ran from turn start).
+    TTS_TASK_TIMEOUT = 45.0  # per-sentence synthesis wall-clock limit
+
     async def tts_consumer() -> None:
-        """Consume TTS tasks from the queue, emit audio + word timings."""
+        """Consume TTS tasks from the queue, emit audio + word timings.
+
+        Exits cleanly via:
+          - None sentinel put by the orchestrator after LLM finishes
+          - CancelledError when consumer_task.cancel() is called on error/cancel
+        """
         nonlocal first_chunk_emitted
         while True:
+            # Await directly — no timeout here. Premature timeouts broke
+            # slow-LLM (GGUF) turns by killing the consumer before any text
+            # was streamed. Exit is guaranteed by sentinel / cancel().
             item = await tts_queue.get()
             if item is None:
                 break
             try:
                 tts_task, seq, cue = item
-                audio, mime, word_timings = await tts_task
+                # Guard individual synthesis tasks against hangs
+                try:
+                    audio, mime, word_timings = await asyncio.wait_for(
+                        tts_task, timeout=TTS_TASK_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("tts_task_timeout", seq=seq, timeout=TTS_TASK_TIMEOUT)
+                    continue
                 if audio:
                     if not first_chunk_emitted:
                         await emit({"type": "orb_state", "state": "speaking"})
+                        await emit({"type": "tts_playing"})
                         first_chunk_emitted = True
                     # Send orb gesture for this sentence's cue
                     gesture = CUE_TO_GESTURE.get(cue, CUE_TO_GESTURE["neutral"])
@@ -212,14 +407,16 @@ async def handle_user_turn(
 
     consumer_task = asyncio.create_task(tts_consumer())
 
+    # H2 fix: cache the settings copy once per turn instead of per-sentence
+    _turn_settings = settings.model_copy()
+    if _turn_settings.tts_engine == "auto":
+        _turn_settings.tts_engine = "edge"  # default to fast engine
+
     async def generate_tts(text_chunk: str, cue: str, is_long_task: bool) -> tuple[bytes, str, list[dict]]:
         cleaned = _strip_markdown_for_tts(text_chunk)
         if not cleaned.strip():
             return b"", "audio/mpeg", []
-        turn_settings = settings.model_copy()
-        if turn_settings.tts_engine == "auto":
-            turn_settings.tts_engine = "edge" if is_long_task else "elevenlabs"
-        return await tts_module.synthesize_with_mime(cleaned, turn_settings, cue=cue)
+        return await tts_module.synthesize_with_mime(cleaned, _turn_settings, cue=cue)
 
     try:
         for iteration in range(MAX_TOOL_ITERATIONS):
@@ -228,8 +425,13 @@ async def handle_user_turn(
             sentence_buffer = ""
 
             async for event in llm_client.stream_chat(
-                messages=messages, tools=TOOL_SCHEMAS, settings=settings
+                messages=messages, tools=TOOL_SCHEMAS, settings=settings,
+                cancel_token=_cancel,  # v12: checked on every chunk for fast barge-in
             ):
+                # Check cancellation at each event
+                if _cancel and _cancel.is_cancelled:
+                    log.info("llm_stream_cancelled")
+                    break
                 etype = event["type"]
 
                 if etype == "text_delta":
@@ -258,6 +460,10 @@ async def handle_user_turn(
                             if sent_cue != "neutral":
                                 current_cue = sent_cue
                             if clean_sentence:
+                                if not first_chunk_emitted:
+                                    await emit({"type": "orb_state", "state": "speaking"})
+                                    await emit({"type": "tts_playing"})
+                                    first_chunk_emitted = True
                                 task = asyncio.create_task(
                                     generate_tts(clean_sentence, current_cue, any_tools_used)
                                 )
@@ -273,6 +479,14 @@ async def handle_user_turn(
                     any_tools_used = True
                     tool_calls_in_turn.append(event)
                     await _run_tool_call(event, session, messages, emit, settings, log)
+                    
+                elif etype == "error":
+                    # Emit as a system note — NOT added to final_answer_parts
+                    # and NOT sent to TTS. These are provider-switch notices
+                    # (e.g. "Cloud AI is busy. Using offline Genie.") and
+                    # must never be spoken aloud or included in the assistant reply.
+                    msg_text = event.get("message", "Error")
+                    await emit({"type": "system_note", "message": msg_text})
 
             if not tool_calls_made:
                 break
@@ -286,6 +500,10 @@ async def handle_user_turn(
             if sent_cue != "neutral":
                 current_cue = sent_cue
             if clean_remaining:
+                if not first_chunk_emitted:
+                    await emit({"type": "orb_state", "state": "speaking"})
+                    await emit({"type": "tts_playing"})
+                    first_chunk_emitted = True
                 task = asyncio.create_task(
                     generate_tts(clean_remaining, current_cue, any_tools_used)
                 )
@@ -297,27 +515,49 @@ async def handle_user_turn(
         final_text = "".join(final_answer_parts).strip()
         await emit({"type": "assistant_text", "delta": "", "final": True})
 
-        # Wait for all pipelined TTS chunks to finish
+        # Signal consumer to stop and wait for it.
+        # Safety ceiling: if something went wrong and None was never consumed,
+        # cap the wait so we don't hang forever.
         await tts_queue.put(None)
-        await consumer_task
+        try:
+            await asyncio.wait_for(consumer_task, timeout=300.0)
+        except asyncio.TimeoutError:
+            log.error("tts_consumer_total_timeout", msg="Consumer did not exit in 5 min — cancelling")
+            consumer_task.cancel()
+            try:
+                await consumer_task
+            except asyncio.CancelledError:
+                pass
 
-        if first_chunk_emitted or (not tool_calls_made and final_text):
+        if first_chunk_emitted:
             await emit({"type": "assistant_audio_end"})
+
+        # ALWAYS signal frontend that the turn is done — mic can re-enable.
+        # Previously this was conditional, causing the frontend to stay stuck
+        # in PROCESSING/ASSISTANT_SPEAKING when no TTS audio was generated
+        # (e.g. tool-only responses, empty LLM output).
+        await emit({"type": "tts_done"})
 
         if final_text:
             messages.append({"role": "assistant", "content": final_text})
 
         session.history = [m for m in messages if m.get("role") != "system"]
         context.update_context(text, tool_calls_in_turn)
+        await asyncio.to_thread(record_turn_memory, session.session_id, text, final_text)
 
         log.info("turn_end", response_length=len(final_text), tools_used=len(tool_calls_in_turn))
         await emit({"type": "orb_state", "state": "idle"})
-
+        
+        # Note: on_tts_complete is now triggered by the frontend's playback_complete event
+        # to prevent microphone echo loops during audio playback.
     except asyncio.CancelledError:
         log.info("turn_cancelled")
         consumer_task.cancel()
         for t in background_tasks:
             t.cancel()
+        # Always release the frontend from any waiting state on cancel
+        await emit({"type": "tts_done"})
+        await emit({"type": "orb_state", "state": "idle"})
         raise
 
     except Exception as exc:
@@ -330,6 +570,8 @@ async def handle_user_turn(
             "message": "Something went wrong on my end. Please try again.",
             "code": type(exc).__name__,
         })
+        # Always emit tts_done on error so frontend never stays stuck
+        await emit({"type": "tts_done"})
         await emit({"type": "orb_state", "state": "idle"})
 
 
@@ -356,6 +598,8 @@ async def _run_tool_call(
     except Exception as exc:  # noqa: BLE001
         from .schemas import ToolResult as TR
         result = TR(status="error", message=f"Tool '{name}' raised unexpectedly: {exc}")
+
+    result = await _maybe_open_suggested_url(result, emit, log)
 
     if log:
         log.info("tool_end", tool=name, status=result.status)
@@ -393,7 +637,7 @@ async def _run_tool_call(
             "role": "tool",
             "tool_call_id": call_id,
             "name": name,
-            "content": result.message,
+            "content": _tool_result_content(result),
         })
 
 

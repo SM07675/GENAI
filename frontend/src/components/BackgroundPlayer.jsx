@@ -20,7 +20,7 @@ export default function BackgroundPlayer() {
   if (!src) return null;
 
   return (
-    <div style={{ display: "none" }}>
+    <div style={{ position: "absolute", top: -9999, left: -9999, width: 1, height: 1, opacity: 0.01, pointerEvents: "none" }}>
       <iframe
         ref={iframeRef}
         width="1"

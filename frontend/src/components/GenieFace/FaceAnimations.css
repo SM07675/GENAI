@@ -1,0 +1,131 @@
+.genie-face-container {
+  width: 190px;
+  height: 190px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 25%,
+    #ffffff 0%,
+    #f7fbff 35%,
+    #e8f2ff 75%,
+    #dbeafe 100%
+  );
+  border: 1px solid rgba(147, 197, 253, 0.65);
+  box-shadow: 
+    0 25px 60px rgba(37, 99, 235, 0.16),
+    inset 0 3px 8px rgba(255, 255, 255, 0.95),
+    0 0 40px var(--genie-color, #3b82f6);
+  transition: 
+    border-color 350ms ease,
+    box-shadow 350ms ease,
+    background 350ms ease,
+    filter 350ms ease;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+}
+
+.genie-eye {
+  width: 38px;
+  height: 46px;
+  background: radial-gradient(
+    circle at 35% 28%,
+    #ffffff 0 9%,
+    #172554 11%,
+    #07142f 75%
+  );
+  border-radius: 48% 48% 52% 52%;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.1s ease-out;
+}
+
+.genie-eyelid {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  right: -2px;
+  height: 100%;
+  background: #f7fbff;
+  transform-origin: top;
+  border-radius: 0 0 50% 50%;
+}
+
+.genie-app-background {
+  background: radial-gradient(
+      circle at 50% 35%,
+      rgba(219, 234, 254, 0.65),
+      transparent 38%
+    ),
+    linear-gradient(
+      180deg,
+      #ffffff,
+      #f6f9ff
+    );
+  min-height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Waking animation wave */
+@keyframes wakeWave {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+.wake-wave {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  border-radius: 50%;
+  background: transparent;
+  border: 4px solid var(--genie-color);
+  animation: wakeWave 0.8s ease-out forwards;
+}
+
+/* Listening rings */
+.listening-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 2px solid var(--genie-color);
+  opacity: 0.6;
+  pointer-events: none;
+  transition: width 0.1s linear, height 0.1s linear, opacity 0.1s linear;
+}
+
+/* Breathing animation for sleeping */
+@keyframes slowBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+.breathe {
+  animation: slowBreathe 4s ease-in-out infinite;
+}
+
+/* Small bounce */
+@keyframes excitedBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-15px); }
+}
+.bounce {
+  animation: excitedBounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+}
+
+/* Particles for thinking/excited */
+@keyframes orbit {
+  0% { transform: rotate(0deg) translateX(100px) rotate(0deg); }
+  100% { transform: rotate(360deg) translateX(100px) rotate(-360deg); }
+}
+.particle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--genie-color);
+  top: 50%;
+  left: 50%;
+  margin: -4px 0 0 -4px;
+}
