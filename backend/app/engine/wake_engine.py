@@ -115,8 +115,13 @@ class WakeEngine:
             return False
 
         try:
+            import os
             if _VOSK_MODEL_CACHE is None:
-                _VOSK_MODEL_CACHE = Model(model_name="vosk-model-small-en-us-0.15")
+                local_path = os.path.abspath("vosk-model-small-en-us-0.15")
+                if os.path.exists(local_path):
+                    _VOSK_MODEL_CACHE = Model(model_path=local_path)
+                else:
+                    _VOSK_MODEL_CACHE = Model(model_name="vosk-model-small-en-us-0.15")
             grammar = json.dumps(self.keywords + ["[unk]"])
             self._rec = KaldiRecognizer(_VOSK_MODEL_CACHE, 16000, grammar)
             return True

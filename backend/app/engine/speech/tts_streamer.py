@@ -98,13 +98,13 @@ _ABBREVS = frozenset([
     "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
 ])
 
-# Sentence-ending punctuation followed by whitespace and an uppercase letter
+# Sentence-ending punctuation followed by whitespace or newline
 _SENT_END_RE = re.compile(
     r"(?<!\d)"                   # not after a digit (decimal)
-    r"([.!?]+)"                  # sentence-ending punctuation (one or more)
+    r"(?<![A-Z][a-z])"           # not after 2-letter abbreviation
+    r"([.!?।]+)"                 # sentence-ending punctuation (one or more)
     r"(?![.!?\d])"               # not followed by more punctuation or digit
-    r"(\s+)"                     # whitespace
-    r"(?=[A-Z\"(])",             # followed by uppercase, quote, or paren
+    r"(\s+|\n+)",                # whitespace or newline boundary
     re.MULTILINE,
 )
 
@@ -206,7 +206,7 @@ class TTSStreamWorker:
                 except asyncio.TimeoutError:
                     self._last_heartbeat = time.time()
                     # Flush stale buffer if LLM stopped sending
-                    if buffer.strip() and len(buffer) >= _MIN_SENTENCE_CHARS:
+                    if buffer.strip():
                         if not (cancel_token and cancel_token.is_cancelled):
                             await synth_queue.put(buffer.strip())
                             total_chars_spoken += len(buffer.strip())
@@ -226,16 +226,10 @@ class TTSStreamWorker:
                 elapsed_ms = (time.monotonic() - stream_start) * 1000
 
                 # ── v12 short-ack fast path ───────────────────────────────
-                # Synthesize short acknowledgements immediately if:
-                #   • It's the very first chunk of the reply (nothing spoken yet)
-                #   • Buffer ends in terminal punctuation
-                #   • At least 180 ms have elapsed (full first chunk arrived)
-                #   • Buffer is shorter than the normal threshold
                 short_ack = (
                     total_chars_received == len(delta)       # first chunk
                     and buffer.rstrip().endswith((".", "!", "?"))
                     and elapsed_ms > _SHORT_ACK_DELAY_MS
-                    and len(buffer.strip()) < _MIN_SENTENCE_CHARS
                 )
 
                 # Try to extract complete sentences from the buffer
@@ -252,7 +246,7 @@ class TTSStreamWorker:
 
                     for sentence in ready:
                         clean = sentence.strip()
-                        if not clean or len(clean) < 3:
+                        if not clean:
                             continue
                         if cancel_token and cancel_token.is_cancelled:
                             break
@@ -276,6 +270,7 @@ class TTSStreamWorker:
                 await synth_queue.put(clean)
                 total_chars_spoken += len(clean)
                 segments_synthesized += 1
+
 
         except asyncio.CancelledError:
             log.info("tts_task_cancelled", segments=segments_synthesized)
@@ -352,13 +347,14 @@ class TTSStreamWorker:
         cancel_token: Optional[CancellationToken],
     ) -> None:
         """Synthesize one sentence and deliver audio. Logs per-sentence timing."""
-        if not text or len(text) < 3:
+        if not text:
             return
 
         # Strip markdown artifacts that would sound bad
         clean_text = _strip_markdown(text)
-        if not clean_text or len(clean_text) < 3:
+        if not clean_text:
             return
+
 
         # Skip pure markdown/symbol-only fragments
         if re.match(r"^[\*\[\]\(\)\#\-\_\`\~\>\|\s]+$", clean_text):

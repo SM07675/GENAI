@@ -50,6 +50,7 @@ class APIManager:
         "gnews": "gnews_api_key",
         "thenewsapi": "thenewsapi_key",
         "google_cse": "google_cse_api_key",
+        "tavily": "tavily_api_key",
         "spotify": "spotify_client_id",
     }
 
@@ -72,6 +73,7 @@ class APIManager:
         "api.elevenlabs.io",
         "api.openweathermap.org",
         "wttr.in",
+        "api.tavily.com",
     }
 
     def __init__(self) -> None:

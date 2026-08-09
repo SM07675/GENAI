@@ -59,10 +59,16 @@ export function useAudioPlayer(externalAudioRef) {
     }
 
     // Audio is still playing — let it drain naturally.
-    // The playback_complete will fire from the queue-drain path (playNext → sendPlaybackComplete).
-    // We do NOT set a fixed timer here because for long responses tts_done arrives
-    // while many seconds of audio remain in the queue — a fixed timer would kill playback.
+    // Set a generous safety timer in case the onended event never fires (Electron bug).
+    // 12s gives even long responses time to finish; the guard prevents double-firing.
     console.log("[AudioPlayer] tts_done received — audio still playing, will complete on drain");
+    clearSafetyTimer();
+    safetyTimerRef.current = setTimeout(() => {
+      if (!playbackSentRef.current) {
+        console.warn("[AudioPlayer] ⚠️ Safety: audio stuck after tts_done, forcing playback_complete");
+        _sendPlaybackComplete();
+      }
+    }, 15000);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Core effect: attach all audio element handlers ─────────────────────────
@@ -75,7 +81,15 @@ export function useAudioPlayer(externalAudioRef) {
       playbackSentRef.current = true;
       clearSafetyTimer();
       console.log("[AudioPlayer] ✅ playback_complete sent");
-      useAppStore.setState({ isTTSPlaying: false });
+      
+      // Update local state instantly so UI drops 'speaking' state immediately
+      const currentGenie = useAppStore.getState().genieState;
+      if (currentGenie === "speaking") {
+        useAppStore.setState({ isTTSPlaying: false, genieState: "sleeping", voiceState: "idle" });
+      } else {
+        useAppStore.setState({ isTTSPlaying: false });
+      }
+
       ttsDoneRef.current = false;
       const ws = useAppStore.getState().ws;
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -108,16 +122,15 @@ export function useAudioPlayer(externalAudioRef) {
           // All audio played and backend confirmed all chunks sent → complete!
           sendPlaybackComplete();
         } else {
-          // Audio drained but tts_done not yet received (rare: very fast playback).
-          // Set a safety timer: if tts_done doesn't arrive in 30s, force complete.
-          console.log("[AudioPlayer] Queue empty — waiting for tts_done (safety: 30s)");
+          // Audio drained but tts_done not yet received. Safety timeout: 1.5s
+          console.log("[AudioPlayer] Queue empty — waiting for tts_done (safety: 8s)");
           clearSafetyTimer();
           safetyTimerRef.current = setTimeout(() => {
             if (!playbackSentRef.current) {
               console.warn("[AudioPlayer] ⚠️ Safety: tts_done never came, forcing playback_complete");
               sendPlaybackComplete();
             }
-          }, 30000);
+          }, 8000);
         }
       }
     };
@@ -138,14 +151,14 @@ export function useAudioPlayer(externalAudioRef) {
     el.onended = handleEnded;
 
     el.onerror = () => {
+      if (!el.src || el.src === "" || el.src === window.location.href) return;
       console.warn("[AudioPlayer] Audio element error — skipping chunk", el.error);
       // Treat errors as ended so we advance the queue
       handleEnded();
     };
 
     // Chromium/Electron MP3 blob bug: `ended` event sometimes doesn't fire.
-    // Fall back to timeupdate: when currentTime is within 150ms of duration,
-    // trigger handleEnded manually. The guard prevents double-fire.
+    // Fall back to timeupdate: when currentTime is within 150ms of duration or audio ended.
     el.ontimeupdate = () => {
       const { duration, currentTime, ended } = el;
       if (ended) {
@@ -154,13 +167,15 @@ export function useAudioPlayer(externalAudioRef) {
       }
       if (
         duration &&
+        duration > 0 &&
         duration !== Infinity &&
         currentTime > 0 &&
-        currentTime >= duration - 0.15
+        currentTime >= duration - 0.12
       ) {
         handleEnded();
       }
     };
+
 
     // Failsafe interval: periodically check if the audio is completely stuck
     // (e.g. paused but isPlayingRef is true, and onended never fired).
@@ -268,6 +283,8 @@ export function useAudioPlayer(externalAudioRef) {
     ttsDoneRef.current    = false;
     endedGuardRef.current = false;
     playbackSentRef.current = false;
+    // Immediately clear the store flag so the mic is never permanently muted
+    useAppStore.setState({ isTTSPlaying: false });
     const el = externalAudioRef?.current;
     if (el) {
       if (el.src && el.src.startsWith("blob:")) URL.revokeObjectURL(el.src);

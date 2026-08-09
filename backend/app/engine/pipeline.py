@@ -150,6 +150,8 @@ class VoicePipeline:
         engine_events.subscribe(PipelineEvent.SPEECH_END, self._on_speech_end)
         engine_events.subscribe(PipelineEvent.SILENCE_TIMEOUT, self._on_silence_timeout)
         engine_events.subscribe(PipelineEvent.MAX_DURATION, self._on_max_duration)
+        # Companion Mode: route companion speech into TTS (the shared Interruption Manager)
+        engine_events.subscribe(PipelineEvent.COMPANION_SPEECH, self._on_companion_speech)
 
         # Register state machine callbacks
         self._sm.on_transition(self._on_state_changed)
@@ -271,8 +273,17 @@ class VoicePipeline:
         """Handle cancel from the WebSocket."""
         await self._cancel_current_turn("user_cancel")
         self._cancel_follow_up_timer()
+        if self._playback:
+            res = self._playback.interrupt()
+            if asyncio.iscoroutine(res):
+                await res
+
+        await self._emit({"type": "stop_audio"})
+        await self._emit({"type": "interrupt"})
         await self._sm.force_transition(EngineState.WAIT_WAKE, "user_cancel")
         await self._emit({"type": "orb_state", "state": "idle"})
+        await self._emit({"type": "engine_state", "state": "wait_wake"})
+
 
     async def on_playback_complete(self) -> None:
         """Handle playback_complete from the frontend."""
@@ -287,6 +298,65 @@ class VoicePipeline:
     # ══════════════════════════════════════════════════════════════════════
     # EVENT BUS HANDLERS (from workers)
     # ══════════════════════════════════════════════════════════════════════
+
+    async def _on_companion_speech(self, event: Event) -> None:
+        """Handle companion speech request — route to TTS without a second queue.
+
+        Companion speech fires as a non-blocking task so it never blocks the
+        event bus. Priority interrupts lower-priority in-flight companion speech
+        but never interrupts the USER's active voice turn (preserving barge-in).
+        """
+        text = event.get("text", "").strip()
+        priority = int(event.get("priority", 5))
+        if not text:
+            return
+
+        # Never interrupt an active user voice turn (LISTENING, UNDERSTANDING)
+        if self._sm.state in (EngineState.LISTENING, EngineState.UNDERSTANDING):
+            log.debug("companion_speech_skipped_user_talking", state=self._sm.state.value)
+            return
+
+        # Fire as background task — does not block event bus
+        asyncio.create_task(
+            self._speak_companion_line(text, priority),
+            name=f"companion_tts_p{priority}",
+        )
+
+    async def _speak_companion_line(self, text: str, priority: int = 5) -> None:
+        """Synthesize and emit a companion speech line through the existing TTS engine.
+
+        This uses the same TTS module as the main pipeline — no second audio stack.
+        """
+        try:
+            from .. import tts as tts_module
+            import base64
+            audio_bytes, mime_type, _ = await tts_module.synthesize_with_mime(
+                text, self._settings
+            )
+            if not audio_bytes:
+                return
+
+            # Only emit companion audio when not speaking a higher-priority turn
+            if self._sm.state in (EngineState.THINKING, EngineState.STREAMING_RESPONSE,
+                                  EngineState.SPEAKING):
+                # If priority is high enough, interrupt; otherwise skip
+                if priority < 8:
+                    log.debug("companion_speech_deferred", state=self._sm.state.value, priority=priority)
+                    return
+
+            import base64
+            await self._emit({
+                "type": "companion_audio_chunk",
+                "audio": base64.b64encode(audio_bytes).decode("ascii"),
+                "mime": mime_type,
+                "text": text,
+                "priority": priority,
+            })
+            log.info("companion_speech_emitted", length=len(text), priority=priority)
+        except Exception as exc:
+            # Companion speech failure must never affect base Genie
+            log.warning("companion_speech_error", error=str(exc))
+
 
     async def _on_wake_detected(self, event: Event) -> None:
         """Wake word detected — transition to LISTENING or barge in."""
@@ -492,7 +562,8 @@ class VoicePipeline:
 
         # Create TTS queue and playback tracker
         tts_text_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=50)
-        self._playback = PlaybackTracker(playback_timeout=60.0)
+        self._playback = PlaybackTracker(playback_timeout=4.0)
+
         tts_worker = TTSStreamWorker(sample_rate=self._settings.tts_sample_rate)
 
         # Get unified context
@@ -652,8 +723,9 @@ class VoicePipeline:
             try:
                 playback_ok = await asyncio.wait_for(
                     self._playback.wait_for_playback(),
-                    timeout=60.0,
+                    timeout=30.0,
                 )
+
             except asyncio.TimeoutError:
                 log.warning("playback_wait_timeout_proceeding",
                             chunks=self._playback.chunks_sent)
@@ -683,8 +755,13 @@ class VoicePipeline:
         elif self._sm.can_transition_to(EngineState.RETURN_TO_LISTENING):
             await self._sm.transition(EngineState.RETURN_TO_LISTENING, "turn_complete")
 
-        if self._settings.follow_up_mode:
-            # Start follow-up timer (NON-BLOCKING!)
+        ans_text = (result.get("text") or "").strip()
+        is_question = bool(re.search(r'\?\s*$', ans_text)) or ans_text.endswith("?")
+        should_follow_up = self._settings.follow_up_mode or is_question
+
+        if should_follow_up:
+            # Start follow-up timer and enter listening mode automatically
+            log.info("auto_entering_listening_mode_for_followup", is_question=is_question)
             self._start_follow_up_timer()
             await self._begin_listening("follow_up")
         else:

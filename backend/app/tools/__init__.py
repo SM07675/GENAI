@@ -14,6 +14,7 @@ from . import screen_vision  # noqa: F401 (capture_screen)
 from . import memory      # noqa: F401 (manage_note, set_reminder)
 from . import internet    # noqa: F401 (search_web, get_news, get_news_briefing, get_api_status)
 from . import utilities   # noqa: F401 (get_weather, get_time, calculate, clipboard_read, clipboard_write)
+from . import screen_context # noqa: F401 (get_recent_screen_context)
 
 from .registry import REGISTRY as TOOLS, tool, tool_manifests, tool_schemas, execute_tool
 

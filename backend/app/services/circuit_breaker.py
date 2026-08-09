@@ -164,3 +164,9 @@ def get_circuit_breaker(
 def all_circuit_breaker_statuses() -> list[dict]:
     """Snapshot of all breaker states for the health/status endpoint."""
     return [cb.status_dict() for cb in _circuit_breakers.values()]
+
+
+# Pre-instantiated subsystem circuit breakers for error recovery parity
+stt_circuit_breaker = get_circuit_breaker("stt_service", failure_threshold=3, cooldown_seconds=30.0)
+tts_circuit_breaker = get_circuit_breaker("tts_service", failure_threshold=3, cooldown_seconds=30.0)
+tool_circuit_breaker = get_circuit_breaker("tool_execution", failure_threshold=4, cooldown_seconds=45.0)

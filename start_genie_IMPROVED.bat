@@ -4,17 +4,21 @@ echo    Genie AI Voice Assistant Launcher
 echo ========================================
 echo.
 
+REM Ensure Node.js is available in PATH
+if exist "C:\Program Files\nodejs" (
+    set "PATH=C:\Program Files\nodejs;%PATH%"
+)
+
 REM Check if backend dependencies are installed
 echo [1/4] Checking backend dependencies...
 cd backend
-.venv\Scripts\python.exe -c "import fastapi" 2>nul
-if errorlevel 1 (
-    echo.
-    echo ERROR: Backend dependencies not installed!
-    echo Please run: .venv\Scripts\pip.exe install -r requirements.txt
-    echo.
-    pause
-    exit /b 1
+if not exist ".venv\Scripts\python.exe" (
+    echo [INFO] Creating virtual environment...
+    py -3 -m venv .venv
+    if errorlevel 1 (
+        python -m venv .venv
+    )
+    .venv\Scripts\pip.exe install -r requirements.txt
 )
 echo     Backend dependencies OK
 
@@ -46,7 +50,7 @@ echo     Frontend dependencies OK
 echo.
 echo [3/4] Starting Backend Server...
 echo.
-start "Genie Backend" cmd /k "cd backend && python run.py"
+start "Genie Backend" cmd /k "cd backend && .venv\Scripts\python.exe run.py"
 echo     Backend starting in new window...
 echo     Wait for 'Application startup complete' message
 

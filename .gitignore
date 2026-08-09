@@ -56,3 +56,24 @@ desktop.ini
 *.log
 logs/
 *.gguf
+
+# --- Agent / AI Tooling metadata ---
+.kiro/
+.agents/
+.dbg/
+
+# --- Databases & Runtime state ---
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# --- Local ML models & assets ---
+vosk-model*
+AnimeModel/
+AI_Assistant_Animated.glb
+*.glb
+
+
+
+

@@ -34,8 +34,13 @@ def _load_vosk_model():
         return _vosk_model_cache
 
     try:
+        import os
         from vosk import Model
-        _vosk_model_cache = Model(model_name="vosk-model-small-en-us-0.15")
+        local_path = os.path.abspath("vosk-model-small-en-us-0.15")
+        if os.path.exists(local_path):
+            _vosk_model_cache = Model(model_path=local_path)
+        else:
+            _vosk_model_cache = Model(model_name="vosk-model-small-en-us-0.15")
         _vosk_model_loaded = True
         log.info("vosk_model_loaded")
         return _vosk_model_cache

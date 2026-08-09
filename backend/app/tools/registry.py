@@ -22,8 +22,17 @@ from dataclasses import dataclass
 from typing import Any, Callable, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
+from enum import Enum
 from ..os.permissions import SideEffectLevel, side_effect_from_value
 from ..schemas import ToolResult
+from ..core.event_bus import event_bus, GenieEvents
+
+
+class PermissionTier(str, Enum):
+    """Permission tier for tool execution security scoping."""
+    READ_ONLY = "READ_ONLY"
+    WRITE = "WRITE"
+    DESTRUCTIVE = "DESTRUCTIVE"
 
 
 # --- JSON-schema type mapping -------------------------------------------
@@ -249,8 +258,28 @@ def _infer_side_effect(name: str) -> SideEffectLevel:
 
 def _emit_tool_started(entry: ToolEntry, call_id: str, arguments: dict[str, Any]) -> None:
     try:
-        from ..os import get_kernel
+        # Determine permission tier
+        tier = PermissionTier.READ_ONLY
+        if entry.side_effect_level in (SideEffectLevel.LOCAL_CHANGE, SideEffectLevel.EXTERNAL_NETWORK):
+            tier = PermissionTier.WRITE
+        elif entry.side_effect_level == SideEffectLevel.SYSTEM_DESTRUCTIVE:
+            tier = PermissionTier.DESTRUCTIVE
 
+        if tier in (PermissionTier.WRITE, PermissionTier.DESTRUCTIVE):
+            event_bus.publish_sync(GenieEvents.PERMISSION_REQUESTED, {
+                "tool_name": entry.name,
+                "tier": tier.value,
+                "call_id": call_id,
+            })
+
+        event_bus.publish_sync(GenieEvents.TOOL_STARTED, {
+            "tool_name": entry.name,
+            "call_id": call_id,
+            "arguments": arguments,
+            "permission_tier": tier.value,
+        })
+
+        from ..os import get_kernel
         get_kernel().record_tool_started(
             tool_name=entry.name,
             arguments={"call_id": call_id, **(arguments or {})},
@@ -262,8 +291,14 @@ def _emit_tool_started(entry: ToolEntry, call_id: str, arguments: dict[str, Any]
 
 def _emit_tool_completed(entry: ToolEntry, call_id: str, result: ToolResult) -> None:
     try:
-        from ..os import get_kernel
+        event_bus.publish_sync(GenieEvents.TOOL_FINISHED, {
+            "tool_name": entry.name,
+            "call_id": call_id,
+            "status": result.status,
+            "message": result.message,
+        })
 
+        from ..os import get_kernel
         get_kernel().record_tool_completed(
             tool_name=entry.name,
             status=result.status,
@@ -271,3 +306,4 @@ def _emit_tool_completed(entry: ToolEntry, call_id: str, result: ToolResult) -> 
         )
     except Exception:
         return
+

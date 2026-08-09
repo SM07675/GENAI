@@ -72,6 +72,10 @@ class PipelineEvent(str, Enum):
     WORKER_RESTARTED = "system.worker_restarted"       # worker recovered
     METRICS = "system.metrics"                         # performance snapshot
 
+    # Companion Mode events (orthogonal to the voice pipeline)
+    COMPANION_SPEECH = "companion.speech"              # companion brain → TTS priority queue
+    CODING_CONTEXT = "companion.coding_context"        # structured IDE/terminal data (coding mode)
+
 
 # High-frequency events that should not be logged individually.
 _QUIET_EVENTS = frozenset({
@@ -119,6 +123,7 @@ class EngineEventBus:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._event_count: int = 0
         self._error_count: int = 0
+        self._latest: dict[PipelineEvent, dict] = {}  # latest payload per event type
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop for thread-safe publishing."""
@@ -172,7 +177,16 @@ class EngineEventBus:
 
     async def emit(self, event_type: PipelineEvent, **data: Any) -> None:
         """Convenience: create and publish an event."""
+        self._latest[event_type] = data
         await self.publish(Event(event_type, data))
+
+    def get_latest(self, event_type: PipelineEvent) -> Optional[dict[str, Any]]:
+        """Return the most recently published payload for an event type, or None.
+
+        Used by the companion ObservationLoop to poll for structured coding context
+        without subscribing to the event stream.
+        """
+        return self._latest.get(event_type)
 
     def publish_sync(self, event_type: PipelineEvent, data: Optional[dict[str, Any]] = None) -> None:
         """Thread-safe synchronous publish for use from OS-level threads.

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../store/appStore';
+import { useCompanionStore } from '../store/companionStore';
 
 const Cog6ToothIcon = ({ className }) => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
@@ -27,6 +28,13 @@ const PaperAirplaneIcon = ({ className }) => (
   </svg>
 );
 
+const CompanionEyeIcon = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+  </svg>
+);
+
 /**
  * MinimalControls — top-right controls row.
  * When `embedded` is true, renders inline (no absolute positioning).
@@ -37,6 +45,8 @@ export default function MinimalControls({ embedded = false }) {
   const isOnline = wsStatus === 'connected' || wsStatus === 'authed';
   const [showInput, setShowInput] = useState(false);
   const [text, setText] = useState("");
+  const companionMode = useCompanionStore((s) => s.mode);
+  const companionActive = companionMode !== 'off';
 
   const handleSend = () => {
     if (!text.trim()) return;
@@ -53,6 +63,16 @@ export default function MinimalControls({ embedded = false }) {
       window.genie.close();
     } else {
       window.close();
+    }
+  };
+
+  const handleCompanionToggle = () => {
+    const ws = useAppStore.getState().ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (companionActive) {
+      ws.send(JSON.stringify({ type: 'companion_stop' }));
+    } else {
+      ws.send(JSON.stringify({ type: 'companion_start', mode: 'general' }));
     }
   };
 
@@ -83,6 +103,19 @@ export default function MinimalControls({ embedded = false }) {
           title="Type a message"
         >
           <KeyboardIcon className="w-4 h-4" />
+        </button>
+
+        <button
+          onClick={handleCompanionToggle}
+          className="p-1.5 rounded-full transition-all"
+          style={{
+            color: companionActive ? '#a78bfa' : '#94a3b8',
+            background: companionActive ? 'rgba(139,92,246,0.15)' : 'transparent',
+            boxShadow: companionActive ? '0 0 8px rgba(139,92,246,0.4)' : 'none',
+          }}
+          title={companionActive ? 'Stop Companion Mode' : 'Start Companion Mode'}
+        >
+          <CompanionEyeIcon className="w-4 h-4" />
         </button>
 
         <button

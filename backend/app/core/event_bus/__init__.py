@@ -1,3 +1,11 @@
-from .bus import event_bus, EventBus, EventCallback
+from .bus import event_bus, EventBus, EventCallback, GenieEvents, VoicePipelineEvents, SystemEvents
 
-__all__ = ["event_bus", "EventBus", "EventCallback"]
+__all__ = [
+    "event_bus",
+    "EventBus",
+    "EventCallback",
+    "GenieEvents",
+    "VoicePipelineEvents",
+    "SystemEvents",
+]
+

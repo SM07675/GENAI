@@ -82,10 +82,11 @@ class Settings(BaseSettings):
     # --- Nvidia (OpenAI-compatible endpoint) -----------------------------
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    nvidia_model: str = "google/gemma-4-31b-it"
     nvidia_temperature: float = 1.0
     nvidia_max_tokens: int = 16384
     nvidia_timeout_seconds: float = 60.0
+    nvidia_enable_thinking: bool = False   # False = instant fast voice response, True = deep reasoning
 
     # --- Offline LLM fallback --------------------------------------------
     local_llm_enabled: bool = True
@@ -154,6 +155,7 @@ class Settings(BaseSettings):
     thenewsapi_key: str = ""               # TheNewsAPI.com
     google_cse_api_key: str = ""           # Google Custom Search JSON API
     google_cse_cx: str = ""                # Programmable Search Engine ID
+    tavily_api_key: str = ""           # Tavily Search API (https://tavily.com) — priority-1 web search
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
     news_default_country: str = "in"
@@ -184,6 +186,24 @@ class Settings(BaseSettings):
     # --- Recovery ---
     voice_recovery_enabled: bool = True
     voice_max_retries: int = 3
+
+    # --- Companion Mode ---------------------------------------------------
+    # Observation intervals per sub-mode (seconds between screen captures)
+    companion_observation_interval_gaming: int = 3
+    companion_observation_interval_coding: int = 8
+    companion_observation_interval_writing: int = 12
+    companion_observation_interval_general: int = 10
+    # Vision API rate control (degrades interval, never crashes on ceiling)
+    companion_max_vision_calls_per_minute: int = 20
+    companion_observation_interval: int = 3
+    companion_vision_enabled: bool = True
+    # Vision provider: "nvidia" (default: Nemotron 12B v2 VL), "gemini", "openai", "local" (future)
+    companion_vision_provider: str = "nvidia"
+    companion_vision_model: str = "nvidia/nemotron-nano-12b-v2-vl"
+    companion_vision_api_key: str = ""
+    companion_vision_confidence_threshold: float = 0.65
+    # Default personality preset: friendly | hype | funny | coach | quiet | default
+    companion_default_personality: str = "default"
 
     # --- v12: Barge-In Feature Flag (instant rollback to v11 behaviour) ----
     # Set ENABLE_BARGE_IN=false in .env to revert to manual-only cancellation.

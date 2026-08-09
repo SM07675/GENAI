@@ -50,13 +50,18 @@ class EngineState(str, Enum):
 TRANSITIONS: dict[EngineState, set[EngineState]] = {
     EngineState.IDLE: {
         EngineState.WAIT_WAKE,
+        EngineState.LISTENING,
+        EngineState.THINKING,
     },
     EngineState.WAIT_WAKE: {
         EngineState.LISTENING,       # wake word or manual wake
+        EngineState.UNDERSTANDING,   # manual audio input
+        EngineState.THINKING,        # text input / manual message submission
         EngineState.IDLE,            # shutdown
     },
     EngineState.LISTENING: {
         EngineState.UNDERSTANDING,   # speech captured
+        EngineState.THINKING,        # text input while listening
         EngineState.WAIT_WAKE,       # silence timeout, no speech
         EngineState.IDLE,            # shutdown
     },

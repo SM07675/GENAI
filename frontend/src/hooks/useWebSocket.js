@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import { useAppStore, ORB_STATES } from "../store/appStore";
+import { useCompanionStore } from "../store/companionStore";
 
 // #region debug-point B:frontend-websocket
 const DEBUG_SERVER_URL = "http://127.0.0.1:7777/event";
@@ -133,7 +134,7 @@ export function useWebSocket(pin, queueAudioChunk, stopAudio, notifyTtsDone) {
             "thinking":            "thinking",
             "streaming_response":  "speaking",
             "speaking":            "speaking",
-            "return_to_listening": "follow_up_listening",
+            "return_to_listening": "listening",   // fix: was follow_up_listening, now shows listening
           };
           const mapped = engineStateMap[msg.state] || "idle";
           forceGenieState(mapped);
@@ -147,14 +148,13 @@ export function useWebSocket(pin, queueAudioChunk, stopAudio, notifyTtsDone) {
             "thinking":            "processing",
             "streaming_response":  "speaking",
             "speaking":            "speaking",
-            "return_to_listening": "follow_up_listening",
+            "return_to_listening": "active_listening",  // fix: clear speaking
           };
           setVoiceState(voiceMap[msg.state] || "idle");
 
-          // SAFETY NET: When pipeline transitions back to listening/idle states,
+          // SAFETY NET: When pipeline transitions back to wait_wake/idle states,
           // force-clear isTTSPlaying so the mic isn't permanently muted.
-          // This prevents the "dead after speaking" bug where TTS flag stays stuck.
-          if (["wait_wake", "listening", "return_to_listening", "idle"].includes(msg.state)) {
+          if (["wait_wake", "idle"].includes(msg.state)) {
             setIsTTSPlaying(false);
           }
 
@@ -356,6 +356,49 @@ export function useWebSocket(pin, queueAudioChunk, stopAudio, notifyTtsDone) {
         case "stop_media":
           useAppStore.getState().stopBackgroundMedia();
           break;
+
+        // ── Companion Mode messages ───────────────────────────────────────────
+        case "companion_state": {
+          const cs = useCompanionStore.getState();
+          cs.setMode(msg.mode, msg.sub_mode);
+          cs.setPrivacy(msg.screen_aware ?? false, msg.voice_active ?? false);
+          break;
+        }
+        case "companion_event": {
+          const cs = useCompanionStore.getState();
+          cs.setLastEvent({
+            type: msg.event_type,
+            importance: msg.importance,
+            payload: msg.payload || {},
+          });
+          break;
+        }
+        case "companion_overlay": {
+          const cs = useCompanionStore.getState();
+          cs.setOverlay(msg.overlay, msg.intensity ?? 0.5);
+          break;
+        }
+        case "companion_privacy": {
+          const cs = useCompanionStore.getState();
+          cs.setPrivacy(msg.screen_aware ?? false, msg.mic_active ?? false);
+          break;
+        }
+        case "companion_bubble": {
+          const cs = useCompanionStore.getState();
+          if (msg.action === "dismiss" || msg.text === null) {
+            cs.setBubble(null, false);
+          } else {
+            cs.setBubble(msg.text, true);
+          }
+          break;
+        }
+        case "companion_audio_chunk": {
+          // Companion speech routes through the SAME audio player as main TTS
+          // (no second audio stack — just a separate audio chunk type)
+          if (queueAudioChunk) queueAudioChunk(msg.audio, msg.mime, null);
+          break;
+        }
+
         default:
           break;
       }

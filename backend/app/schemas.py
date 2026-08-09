@@ -45,10 +45,24 @@ OrbState = Literal["idle", "listening", "thinking", "speaking"]
 
 class WSIn(BaseModel):
     """Validated inbound JSON message. Binary audio uses raw frames instead."""
-    type: Literal["hello", "text", "audio_end", "cancel", "heartbeat", "confirm", "playback_complete", "manual_wake", "barge_in"]
+    type: Literal[
+        "hello", "text", "audio_end", "cancel", "heartbeat", "confirm",
+        "playback_complete", "manual_wake", "barge_in", "camera_frame",
+        # Companion Mode control messages
+        "companion_start",        # { mode?: "gaming"|"coding"|"writing"|"general" }
+        "companion_stop",         # {}
+        "companion_pause",        # {}
+        "companion_resume",       # {}
+        "companion_set_mode",     # { mode: "gaming"|"coding"|"writing"|"general" }
+        "companion_hotkey_analyze",  # on-demand single analysis (GameCompanionAI fallback)
+        "companion_quick_look",   # { text?: "what does this error mean?" } (Quick Look fast path)
+    ]
     pin: Optional[str] = None
     text: Optional[str] = None
+    frame: Optional[str] = None       # base64 JPEG image for camera_frame
+    timestamp: Optional[int] = None   # client timestamp ms
     confirmed: Optional[bool] = None  # for "confirm" messages
+    mode: Optional[str] = None        # for companion_start / companion_set_mode
 
 
 class ToolResult(BaseModel):

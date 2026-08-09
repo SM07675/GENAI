@@ -54,9 +54,9 @@ class AudioPipeline:
         ring_buffer_seconds: float = 30.0,
         silence_timeout: float = 0.9,
         speech_start_timeout: float = 5.0,
-        minimum_speech_duration: float = 0.3,
+        minimum_speech_duration: float = 0.4,   # raised from 0.3 to reduce false triggers
         maximum_command_duration: float = 45.0,
-        pre_roll_ms: int = 500,
+        pre_roll_ms: int = 600,                  # slightly more pre-roll for cleaner starts
     ):
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
@@ -97,9 +97,10 @@ class AudioPipeline:
 
         # Noise baseline (EMA)
         self._baseline_rms = 0.0
-        self._noise_alpha = 0.05
+        self._noise_alpha = 0.03        # slower adaptation for more stable baseline
         self._noise_initialized = False
         self._noise_init_count = 0
+        self._noise_init_frames = 30    # need 30 frames (~0.96s) for reliable baseline
 
         # Threading
         self._running = False
@@ -226,16 +227,16 @@ class AudioPipeline:
                         if conf > max_conf:
                             max_conf = conf
                             
-                threshold = 0.7 if self._echo_suppression else 0.4
+                threshold = 0.80 if self._echo_suppression else 0.42
                 return max_conf > threshold
             except Exception as e:
                 log.warning("silero_vad_error", error=str(e))
 
-        # Fallback: energy-based VAD
+        # Fallback: energy-based VAD with adaptive noise gate
         energy = float(np.abs(data).mean())
-        threshold = max(200.0, self._baseline_rms * 1.5 + 100)
-        if self._echo_suppression:
-            threshold *= 2.5
+        # During echo suppression, require 3.5x baseline to reject TTS echo
+        multiplier = 3.5 if self._echo_suppression else 1.8
+        threshold = max(250.0, self._baseline_rms * multiplier + 120)
         return energy > threshold
 
     def _update_noise_baseline(self, frame: bytes) -> None:
@@ -251,11 +252,13 @@ class AudioPipeline:
                 (self._baseline_rms * (self._noise_init_count - 1) + energy)
                 / self._noise_init_count
             )
-            if self._noise_init_count >= 20:
+            if self._noise_init_count >= self._noise_init_frames:
                 self._noise_initialized = True
+                log.info("noise_baseline_initialized", rms=round(self._baseline_rms, 1))
         else:
-            if self._baseline_rms > 0 and energy > self._baseline_rms * 3.0:
-                return  # outlier
+            # Only update baseline from quiet frames (not speech)
+            if self._baseline_rms > 0 and energy > self._baseline_rms * 2.5:
+                return  # outlier: likely speech or spike, don't contaminate baseline
             self._baseline_rms = (
                 self._noise_alpha * energy
                 + (1 - self._noise_alpha) * self._baseline_rms

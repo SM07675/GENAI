@@ -23,7 +23,8 @@ log = structlog.get_logger("genie.engine.tts_streamer")
 Emitter = Callable[[dict], Awaitable[None]]
 
 # Sentence boundary regex
-_SENTENCE_END_RE = re.compile(r'([.?!।]\s+)')
+_SENTENCE_END_RE = re.compile(r'([.?!।]\s+|\n+)')
+
 
 # Delivery cue regex (from orchestrator)
 _CUE_RE = re.compile(r'\[\[(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\]\]')
@@ -42,8 +43,10 @@ CUE_TO_GESTURE: dict[str, dict] = {
 
 
 def _strip_markdown_for_tts(text: str) -> str:
-    """Strip markdown artifacts before TTS."""
+    """Strip markdown artifacts and emotion tags before TTS."""
     s = text
+    s = re.sub(r'\[\[[^\]]*\]\]', '', s)
+    s = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', s, flags=re.IGNORECASE)
     s = re.sub(r'^#{1,6}\s+', '', s, flags=re.MULTILINE)
     s = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', s)
     s = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', s)
@@ -62,8 +65,10 @@ def _extract_cue(text: str) -> tuple[str, str]:
     cue = "neutral"
     for m in _CUE_RE.finditer(text):
         cue = m.group(1)
-    clean = _CUE_RE.sub("", text).strip()
-    clean = re.sub(r'\s{2,}', ' ', clean)
+    clean = _CUE_RE.sub("", text)
+    clean = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\[\[?[^\]]*\]?\]?', '', clean)
+    clean = re.sub(r'\s{2,}', ' ', clean).strip()
     return cue, clean
 
 

@@ -31,8 +31,9 @@ class PlaybackTracker:
     - Signals interruption
     """
 
-    def __init__(self, playback_timeout: float = 60.0):
+    def __init__(self, playback_timeout: float = 4.0):
         self._playback_timeout = playback_timeout
+
         self._chunks_sent = 0
         self._bytes_sent = 0
         self._playback_started_at = 0.0

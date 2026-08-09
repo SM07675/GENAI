@@ -33,6 +33,22 @@ class VoicePipelineEvents:
     FOLLOW_UP_TIMEOUT = "voice.follow_up_timeout"
 
 
+class GenieEvents:
+    """Standardized event names for Genie OS lifecycle and companion layer."""
+    WAKE_WORD_DETECTED = "WakeWordDetected"
+    LISTENING_STARTED = "ListeningStarted"
+    SPEECH_RECOGNIZED = "SpeechRecognized"
+    INTENT_RESOLVED = "IntentResolved"
+    PLAN_CREATED = "PlanCreated"
+    TOOL_STARTED = "ToolStarted"
+    TOOL_FINISHED = "ToolFinished"
+    MEMORY_UPDATED = "MemoryUpdated"
+    RESPONSE_GENERATED = "ResponseGenerated"
+    LISTENING_RESUMED = "ListeningResumed"
+    PERMISSION_REQUESTED = "PermissionRequested"
+    SUGGESTION_QUEUED = "SuggestionQueued"
+
+
 class SystemEvents:
     """Standard event names for system-level operations."""
     STARTUP = "system.startup"
@@ -40,6 +56,7 @@ class SystemEvents:
     HEALTH_CHECK = "system.health_check"
     SUBSYSTEM_ERROR = "system.subsystem_error"
     SUBSYSTEM_RECOVERED = "system.subsystem_recovered"
+
 
 
 class EventBus:

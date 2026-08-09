@@ -1,0 +1,79 @@
+name: Genie CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, release ]
+  pull_request:
+    branches: [ main, release ]
+
+jobs:
+  lint-and-test:
+    name: Lint, Typecheck & Unit Tests (Windows & Ubuntu)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install Backend Dependencies
+        run: |
+          cd backend
+          python -m venv .venv
+          .\.venv\Scripts\python -m pip install --upgrade pip
+          .\.venv\Scripts\pip install -r requirements.txt
+
+      - name: Install Frontend Dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Backend Unit Tests (§1.6, §3)
+        run: |
+          cd backend
+          .\.venv\Scripts\python run_tests.py
+
+      - name: Security Scan (Backend Bandit)
+        run: |
+          cd backend
+          .\.venv\Scripts\pip install bandit
+          .\.venv\Scripts\bandit -r app -ll -ii || true
+
+  build-windows:
+    name: Build Windows Desktop Installer (§7, §21)
+    needs: lint-and-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Frontend Assets
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: genie-dist
+          path: frontend/dist/

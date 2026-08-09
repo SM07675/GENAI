@@ -356,7 +356,7 @@ async def stream_chat(
             "stream": True,
         }
         if provider.id == "nvidia":
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}, "reasoning_budget": 16384}
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": settings.nvidia_enable_thinking}}
             kwargs["top_p"] = 0.95
         if tools:
             kwargs["tools"] = tools

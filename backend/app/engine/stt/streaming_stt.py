@@ -11,6 +11,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Optional
 
@@ -24,12 +25,54 @@ from ..metrics import pipeline_metrics
 log = structlog.get_logger("genie.engine.stt")
 
 
+def _ensure_av_dlls() -> None:
+    """Register av's bundled FFmpeg DLL directory and nvidia CUDA DLLs on Windows.
+
+    Without this, av._core fails to load inside asyncio thread-pool workers
+    because the DLL search path is not inherited correctly on Windows.
+    Must be called before any faster_whisper / av import.
+    """
+    if os.name != 'nt':
+        return
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('av')
+        if spec and spec.submodule_search_locations:
+            av_dir = list(spec.submodule_search_locations)[0]
+            av_libs = os.path.abspath(os.path.join(av_dir, os.pardir, 'av.libs'))
+            if os.path.exists(av_libs) and hasattr(os, 'add_dll_directory'):
+                try:
+                    os.add_dll_directory(av_libs)
+                except (OSError, ValueError):
+                    pass
+            path_env = os.environ.get('PATH', '')
+            if av_libs not in path_env:
+                os.environ['PATH'] = av_libs + os.pathsep + path_env
+
+        spec_nv = importlib.util.find_spec('nvidia')
+        if spec_nv and spec_nv.submodule_search_locations:
+            nvidia_dir = list(spec_nv.submodule_search_locations)[0]
+            for root, dirs, files in os.walk(nvidia_dir):
+                if os.path.basename(root) == 'bin':
+                    try:
+                        os.add_dll_directory(root)
+                    except (OSError, ValueError):
+                        pass
+                    path_env = os.environ.get('PATH', '')
+                    if root not in path_env:
+                        os.environ['PATH'] = root + os.pathsep + path_env
+        import av  # noqa: F401 - Preload av into sys.modules
+    except Exception:
+        pass
+
+
 def _get_shared_model(settings: Settings):
     """Get the shared faster-whisper model from the app.stt module.
 
     This ensures we use a SINGLE model instance across the entire application,
     preventing the duplicate loading bug identified in the audit.
     """
+    _ensure_av_dlls()
     from ...stt import _get_fw_model
     return _get_fw_model(settings)
 

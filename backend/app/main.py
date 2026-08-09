@@ -19,10 +19,48 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import urllib.request
 from contextlib import asynccontextmanager
 from typing import Optional
+
+# Disable non-critical HuggingFace Hub warnings
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Ensure av's FFmpeg DLLs and nvidia CUDA DLLs (cublas, cudnn) are registered at process startup
+if os.name == 'nt':
+    try:
+        import importlib.util
+        _av_spec = importlib.util.find_spec('av')
+        if _av_spec and _av_spec.submodule_search_locations:
+            _av_dir = list(_av_spec.submodule_search_locations)[0]
+            _av_libs = os.path.abspath(os.path.join(_av_dir, os.pardir, 'av.libs'))
+            if os.path.exists(_av_libs) and hasattr(os, 'add_dll_directory'):
+                try:
+                    os.add_dll_directory(_av_libs)
+                except Exception:
+                    pass
+            _path_env = os.environ.get('PATH', '')
+            if _av_libs not in _path_env:
+                os.environ['PATH'] = _av_libs + os.pathsep + _path_env
+
+        _nv_spec = importlib.util.find_spec('nvidia')
+        if _nv_spec and _nv_spec.submodule_search_locations:
+            _nv_dir = list(_nv_spec.submodule_search_locations)[0]
+            for _root, _dirs, _files in os.walk(_nv_dir):
+                if os.path.basename(_root) == 'bin':
+                    try:
+                        os.add_dll_directory(_root)
+                    except Exception:
+                        pass
+                    _path_env = os.environ.get('PATH', '')
+                    if _root not in _path_env:
+                        os.environ['PATH'] = _root + os.pathsep + _path_env
+        import av  # noqa: F401 - Preload av into sys.modules
+    except Exception:
+        pass
 
 import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -34,6 +72,8 @@ from . import llm_client, ngrok_tunnel, orchestrator
 from .api.external import router as external_api_router
 from .api.music import router as music_api_router
 from .api.mobile import router as mobile_api_router
+from .api.v1_android import router as v1_android_router
+from .services.mdns_server import start_mdns_service, stop_mdns_service
 from .auth import Session, get_session, issue_token, verify_pin
 from .config import get_settings
 from .os import get_kernel
@@ -194,9 +234,24 @@ async def lifespan(app: FastAPI):
 
     app.state.cleanup_task = asyncio.create_task(_periodic_cleanup())
 
+    # Start mDNS Zeroconf service for Android auto-discovery
+    start_mdns_service(settings.port)
+
+    # Initialize Companion Manager (lazy — does nothing until activated by voice intent)
+    from .companion.manager import companion_manager
+    app.state.companion = companion_manager
+    log.info("companion_manager_initialized")
+
     yield
 
     # Cleanup
+    stop_mdns_service()
+    # Stop companion cleanly (zero orphaned tasks)
+    if hasattr(app.state, "companion"):
+        try:
+            await app.state.companion.stop()
+        except Exception:
+            pass
     if hasattr(app.state, "cleanup_task"):
         app.state.cleanup_task.cancel()
     if hasattr(app.state, "engine"):
@@ -219,6 +274,7 @@ app.add_middleware(
 app.include_router(external_api_router, prefix="/api/v1")
 app.include_router(music_api_router, prefix="/api/v1")
 app.include_router(mobile_api_router, prefix="/api/v1")
+app.include_router(v1_android_router)
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
@@ -229,6 +285,9 @@ async def health() -> dict:
 
     return {
         "status": "ok",
+        "service": "genie",
+        "version": "1.0.0",
+        "ready": True,
         "pin_configured": bool(settings.genie_pin),
         "tools": [t["function"]["name"] for t in TOOL_SCHEMAS],
         "apis": api_manager.status(),
@@ -433,6 +492,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 
 
+            # ── Binary frame (Audio Chunk) ────────────────────────────────────
+            bytes_data = message.get("bytes")
+            if bytes_data is not None:
+                if session and hasattr(app.state, "engine"):
+                    # Web/Android client streaming binary audio frame
+                    pass
+                continue
+
             # ── Text (JSON) frame ─────────────────────────────────────────────
             raw = message.get("text")
             if raw is None:
@@ -572,6 +639,52 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 )
                 if hasattr(app.state, "engine"):
                     await app.state.engine.on_playback_complete()
+                continue
+
+            # ── Companion Mode control messages ───────────────────────────────
+            if mtype in ("companion_start", "companion_stop", "companion_pause",
+                         "companion_resume", "companion_set_mode", "companion_hotkey_analyze",
+                         "companion_quick_look"):
+                if hasattr(app.state, "companion"):
+                    companion = app.state.companion
+                    # Bind the current session emitter so companion can send WS messages
+                    companion.set_emit(emit)
+                    try:
+                        if mtype == "companion_start":
+                            from .companion.manager import CompanionSubMode
+                            raw_mode = (msg_in.mode or "general").lower()
+                            sub_mode = CompanionSubMode(raw_mode) if raw_mode in CompanionSubMode._value2member_map_ else CompanionSubMode.GENERAL
+                            await companion.start(
+                                sub_mode=sub_mode,
+                                personality_preset=settings.companion_default_personality,
+                            )
+                        elif mtype == "companion_stop":
+                            await companion.stop()
+                        elif mtype == "companion_pause":
+                            await companion.pause()
+                        elif mtype == "companion_resume":
+                            await companion.resume()
+                        elif mtype == "companion_set_mode":
+                            from .companion.manager import CompanionSubMode
+                            raw_mode = (msg_in.mode or "general").lower()
+                            sub_mode = CompanionSubMode(raw_mode) if raw_mode in CompanionSubMode._value2member_map_ else CompanionSubMode.GENERAL
+                            await companion.set_mode(sub_mode)
+                        elif mtype == "companion_hotkey_analyze":
+                            # On-demand single analysis (GameCompanionAI-style fallback)
+                            if companion.is_active and companion._observation_loop:
+                                asyncio.create_task(
+                                    companion._observation_loop._observe_once(),
+                                    name="companion_hotkey_observe",
+                                )
+                        elif mtype == "companion_quick_look":
+                            # Quick Look ("Look & Answer" fast path)
+                            asyncio.create_task(
+                                companion.quick_look(question=msg_in.text),
+                                name="companion_quick_look_task",
+                            )
+                    except Exception as exc:
+                        # Companion failure never affects base Genie
+                        log.warning("companion_ws_handler_error", mtype=mtype, error=str(exc))
                 continue
 
     except WebSocketDisconnect:

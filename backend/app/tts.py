@@ -81,8 +81,9 @@ def init_tts_model() -> None:
 
     Called by the FastAPI lifespan. Subsequent calls are no-ops.
     """
-    global _kokoro_pipeline, _cuda_available, _gpu_name, _model_load_time_ms
+    global _kokoro_pipeline, _chatterbox_pipeline, _cuda_available, _gpu_name, _model_load_time_ms
     global _kokoro_voice, _kokoro_speed, _kokoro_lang, _kokoro_sample_rate
+
 
     with _kokoro_init_lock:
         if _kokoro_pipeline is not None:
@@ -235,23 +236,48 @@ async def _synthesize_edge_async(text: str, voice: str = "en-IN-NeerjaNeural") -
     return bytes(audio_data), "audio/mpeg"
 
 
-async def _synthesize_elevenlabs_async(text: str, voice_id: str, model: str, api_key: str) -> tuple[bytes, str]:
-    """Synthesize using ElevenLabs TTS (best humanized, multilingual)."""
+async def _synthesize_elevenlabs_async(
+    text: str,
+    voice_id: str,
+    model: str,
+    api_key: str,
+    cue: str = "neutral",
+) -> tuple[bytes, str]:
+    """Synthesize using ElevenLabs TTS — most human-sounding, multilingual.
+
+    Voice settings are tuned for a warm, natural assistant voice.
+    The ``cue`` delivery tag from the system prompt drives slight style shifts
+    (e.g. [[warm]] boosts expressiveness, [[urgent]] tightens stability).
+    """
     import aiohttp
+
+    # Map system-prompt delivery cues → ElevenLabs style / stability tweaks
+    _CUE_STYLE: dict[str, dict] = {
+        "neutral":     {"stability": 0.55, "similarity_boost": 0.80, "style": 0.20, "use_speaker_boost": True},
+        "warm":        {"stability": 0.45, "similarity_boost": 0.82, "style": 0.40, "use_speaker_boost": True},
+        "cheerful":    {"stability": 0.40, "similarity_boost": 0.78, "style": 0.55, "use_speaker_boost": True},
+        "empathetic":  {"stability": 0.50, "similarity_boost": 0.85, "style": 0.35, "use_speaker_boost": True},
+        "apologetic":  {"stability": 0.52, "similarity_boost": 0.83, "style": 0.30, "use_speaker_boost": True},
+        "urgent":      {"stability": 0.70, "similarity_boost": 0.90, "style": 0.10, "use_speaker_boost": True},
+        "focused":     {"stability": 0.65, "similarity_boost": 0.85, "style": 0.15, "use_speaker_boost": True},
+        "reassuring":  {"stability": 0.48, "similarity_boost": 0.84, "style": 0.38, "use_speaker_boost": True},
+    }
+    voice_settings = _CUE_STYLE.get(cue.lower(), _CUE_STYLE["neutral"])
 
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
         "xi-api-key": api_key,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    data = {
+    payload = {
         "text": text,
         "model_id": model,
-        "output_format": "mp3_44100_128",
+        "output_format": "mp3_44100_192",   # 192 kbps — highest clarity
+        "voice_settings": voice_settings,
     }
-    
+
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=data) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             if resp.status == 200:
                 audio_bytes = await resp.read()
                 return audio_bytes, "audio/mpeg"
@@ -310,6 +336,8 @@ async def synthesize_with_mime(
 
     settings = settings or get_settings()
     text = (text or "").strip()
+    text = re.sub(r'\[\[?[^\]]*\]?\]?', '', text)
+    text = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', text, flags=re.IGNORECASE).strip()
     if not text:
         return b"", "audio/wav", []
 
@@ -350,10 +378,10 @@ async def synthesize_with_mime(
     has_elevenlabs = bool(getattr(settings, "elevenlabs_api_key", ""))
     if engine == "elevenlabs" or (engine == "auto" and has_elevenlabs):
         try:
-            voice_id = getattr(settings, "tts_elevenlabs_voice_id", "JBFqnCBsd6RMkjVDRZzb")
-            model = getattr(settings, "tts_elevenlabs_model", "eleven_multilingual_v2")
+            voice_id = getattr(settings, "tts_elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM")
+            model = getattr(settings, "tts_elevenlabs_model", "eleven_turbo_v2_5")
             audio_bytes, mime = await _synthesize_elevenlabs_async(
-                text, voice_id, model, settings.elevenlabs_api_key
+                text, voice_id, model, settings.elevenlabs_api_key, cue=cue
             )
             elapsed_ms = (time.perf_counter() - t0) * 1000
             log.info(
@@ -415,7 +443,12 @@ async def synthesize_with_mime(
                 raise
 
     # ── Edge TTS path (primary or fallback) ──────────────────────────────────
-    edge_voice = getattr(settings, "tts_edge_voice", "en-IN-NeerjaNeural") if settings else "en-IN-NeerjaNeural"
+    default_voice = getattr(settings, "tts_edge_voice", "en-US-JennyNeural") if settings else "en-US-JennyNeural"
+    if bool(re.search(r'[\u0900-\u097F]', text)):
+        edge_voice = "hi-IN-SwaraNeural"
+    else:
+        edge_voice = default_voice
+
     try:
         audio_bytes, mime = await _synthesize_edge_async(text, edge_voice)
         elapsed_ms = (time.perf_counter() - t0) * 1000

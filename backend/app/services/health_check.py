@@ -39,16 +39,17 @@ class StartupHealthCheck:
     async def run_all(self) -> bool:
         """Run all health checks. Returns True if all critical checks pass."""
         log.info("health_check_starting")
+        self.results.clear()
         
         # Critical checks - must pass for voice to work
-        await self.check_microphone()
-        await self.check_stt_model()
-        await self.check_tts_engine()
-        await self.check_llm_provider()
+        self.results.append(await self.check_microphone())
+        self.results.append(await self.check_stt_model())
+        self.results.append(await self.check_tts_engine())
+        self.results.append(await self.check_llm_provider())
         
         # Optional checks - log warnings but don't fail
-        await self.check_wake_word_engine()
-        await self.check_apis()
+        self.results.append(await self.check_wake_word_engine())
+        self.results.append(await self.check_apis())
         
         # Report results
         critical_passed = all(
@@ -66,9 +67,9 @@ class StartupHealthCheck:
     async def check_microphone(self) -> HealthCheckResult:
         """Check if microphone support is available.
         
-        NOTE: We do NOT create a PyAudio instance here — that would conflict
-        with the MicrophoneService which opens the mic exclusively (audit fix #10).
-        We only verify pyaudio is importable.
+        NOTE: We do NOT create an audio stream here — that would conflict
+        with the MicrophoneService which opens the mic exclusively.
+        We verify PyAudio or sounddevice is importable.
         """
         try:
             import pyaudio  # noqa: F401
@@ -76,15 +77,24 @@ class StartupHealthCheck:
                 "microphone",
                 True,
                 "PyAudio available (mic will be opened by MicrophoneService)",
-                {},
+                {"engine": "pyaudio"},
             )
         except ImportError:
-            return HealthCheckResult(
-                "microphone",
-                False,
-                "PyAudio not installed",
-                {},
-            )
+            try:
+                import sounddevice  # noqa: F401
+                return HealthCheckResult(
+                    "microphone",
+                    True,
+                    "sounddevice available (mic will be opened by MicrophoneService)",
+                    {"engine": "sounddevice"},
+                )
+            except ImportError:
+                return HealthCheckResult(
+                    "microphone",
+                    False,
+                    "Neither PyAudio nor sounddevice installed",
+                    {},
+                )
         except Exception as e:
             return HealthCheckResult(
                 "microphone",
@@ -242,7 +252,7 @@ class StartupHealthCheck:
             )
         
         try:
-            from ..wake_word import WakeWordDetector
+            from ..engine.wake.wake_detector import WakeDetector
             
             engine = self.settings.wake_word_engine
             

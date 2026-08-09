@@ -18,7 +18,8 @@ log = structlog.get_logger("genie.engine.playback")
 Emitter = Callable[[dict], Awaitable[None]]
 
 # Max time to wait for frontend's playback_complete before force-transitioning
-PLAYBACK_TIMEOUT_S = 60.0
+PLAYBACK_TIMEOUT_S = 30.0
+
 
 
 class PlaybackController:

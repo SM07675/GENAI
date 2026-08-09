@@ -136,7 +136,8 @@ class MicrophoneService:
         )
 
     def _open_audio(self) -> bool:
-        """Open PyAudio stream."""
+        """Open audio stream via PyAudio or sounddevice fallback."""
+        # 1. Try PyAudio
         try:
             import pyaudio
             self._pyaudio = pyaudio.PyAudio()
@@ -147,6 +148,25 @@ class MicrophoneService:
                 input=True,
                 frames_per_buffer=self.chunk_size,
             )
+            self._backend_type = "pyaudio"
+            log.info("microphone_opened", engine="pyaudio")
+            return True
+        except Exception as exc:
+            log.warning("pyaudio_unavailable_trying_sounddevice", error=str(exc))
+            self._close_audio()
+
+        # 2. Fallback to sounddevice (prebuilt PortAudio included)
+        try:
+            import sounddevice as sd
+            self._stream = sd.RawInputStream(
+                samplerate=self.sample_rate,
+                blocksize=self.chunk_size,
+                channels=1,
+                dtype="int16",
+            )
+            self._stream.start()
+            self._backend_type = "sounddevice"
+            log.info("microphone_opened", engine="sounddevice")
             return True
         except Exception as exc:
             log.error("microphone_open_failed", error=str(exc))
@@ -154,11 +174,15 @@ class MicrophoneService:
             return False
 
     def _close_audio(self) -> None:
-        """Release PyAudio resources safely."""
+        """Release audio resources safely."""
         if self._stream:
             try:
-                self._stream.stop_stream()
-                self._stream.close()
+                if getattr(self, "_backend_type", "pyaudio") == "sounddevice":
+                    self._stream.stop()
+                    self._stream.close()
+                else:
+                    self._stream.stop_stream()
+                    self._stream.close()
             except Exception:
                 pass
             self._stream = None
@@ -182,6 +206,7 @@ class MicrophoneService:
         """
         consecutive_errors = 0
         max_consecutive_errors = 20
+        is_sd = getattr(self, "_backend_type", "pyaudio") == "sounddevice"
 
         while self._running and not self._stop_event.is_set():
             if not self._stream:
@@ -191,7 +216,12 @@ class MicrophoneService:
                 continue
 
             try:
-                data = self._stream.read(self.chunk_size, exception_on_overflow=False)
+                if is_sd:
+                    data_buf, overflow = self._stream.read(self.chunk_size)
+                    data = bytes(data_buf)
+                else:
+                    data = self._stream.read(self.chunk_size, exception_on_overflow=False)
+
                 consecutive_errors = 0
                 self._total_frames_captured += 1
                 self._process_frame(data)
@@ -213,6 +243,7 @@ class MicrophoneService:
                 log.error("microphone_read_error", error=str(exc), count=consecutive_errors)
                 if consecutive_errors >= max_consecutive_errors:
                     if not self._auto_reconnect():
+                        break
                         break
 
     def _process_frame(self, frame: bytes) -> None:

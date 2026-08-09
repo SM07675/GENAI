@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -31,13 +32,18 @@ from . import stt, llm_client
 from .auth import Session
 from .config import Settings, get_settings
 from .core.context.peak_context import build_peak_context_packet, record_turn_memory
+from .core.context.context_snapshot import get_turn_context_snapshot
+from .core.agents.companion_agent import companion_agent
+from .core.reflection_engine import reflection_engine
+from .core.event_bus import event_bus, GenieEvents
+from .core.memory.manager import get_memory_manager
 from .tools import TOOL_SCHEMAS, execute_tool
 
 _stdlib_log = logging.getLogger("genie.orchestrator")
 
 Emitter = Callable[[dict], Awaitable[None]]
 
-MAX_TOOL_ITERATIONS = 8
+MAX_TOOL_ITERATIONS = 4   # reduced from 8 — prevents runaway search loops
 TOOL_RESULT_CONTENT_LIMIT = 12000
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
@@ -72,15 +78,24 @@ def _strip_wake_phrase(text: str) -> str:
 
 
 def load_system_prompt() -> str:
+    """Load system prompt from disk and inject the current date/time.
+
+    NOTE: NOT cached per-call — datetime must be fresh every turn so the
+    model knows the real current date and doesn't hallucinate past dates
+    in search queries.
+    """
     global _SYSTEM_PROMPT_CACHE
-    if _SYSTEM_PROMPT_CACHE is not None:
-        return _SYSTEM_PROMPT_CACHE
-    try:
-        _SYSTEM_PROMPT_CACHE = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        _stdlib_log.warning("system_prompt.md missing; using minimal prompt.")
-        _SYSTEM_PROMPT_CACHE = "You are Genie, a helpful assistant."
-    return _SYSTEM_PROMPT_CACHE
+    if _SYSTEM_PROMPT_CACHE is None:
+        try:
+            _SYSTEM_PROMPT_CACHE = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _stdlib_log.warning("system_prompt.md missing; using minimal prompt.")
+            _SYSTEM_PROMPT_CACHE = "You are Genie, a helpful assistant."
+
+    # Inject current date/time so model uses the right date in search queries
+    now = datetime.now(timezone.utc).astimezone()  # local time with tz
+    current_dt = now.strftime("%A, %d %B %Y %H:%M %Z")   # e.g. "Saturday, 26 July 2026 18:15 IST"
+    return _SYSTEM_PROMPT_CACHE.replace("{CURRENT_DATETIME}", current_dt)
 
 
 def _trim_history(history: list[dict]) -> list[dict]:
@@ -159,6 +174,44 @@ CUE_TO_GESTURE: dict[str, dict[str, Any]] = {
 }
 
 
+class StreamTagFilter:
+    """Accumulates streaming deltas to robustly filter out bracket tags (e.g. [[neutral]]) across chunk boundaries."""
+
+    def __init__(self):
+        self._buf = ""
+
+    def push(self, delta: str) -> tuple[str, str]:
+        self._buf += delta
+        cue = "neutral"
+
+        for m in _CUE_RE.finditer(self._buf):
+            cue = m.group(1)
+        self._buf = _CUE_RE.sub("", self._buf)
+        self._buf = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', self._buf, flags=re.IGNORECASE)
+
+        if '[' in self._buf:
+            idx = self._buf.find('[')
+            ready = self._buf[:idx]
+            self._buf = self._buf[idx:]
+            if len(self._buf) > 30 or '\n' in self._buf:
+                ready += self._buf
+                self._buf = ""
+            return ready, cue
+        else:
+            ready = self._buf
+            self._buf = ""
+            return ready, cue
+
+    def flush(self) -> tuple[str, str]:
+        cue = "neutral"
+        for m in _CUE_RE.finditer(self._buf):
+            cue = m.group(1)
+        clean = _CUE_RE.sub("", self._buf)
+        clean = re.sub(r'\[\[?[^\]]*\]?\]?', '', clean)
+        self._buf = ""
+        return clean, cue
+
+
 def extract_cue(text: str) -> tuple[str, str]:
     """Extract the last [[cue]] from text and return (cue, clean_text).
 
@@ -168,14 +221,20 @@ def extract_cue(text: str) -> tuple[str, str]:
     for m in _CUE_RE.finditer(text):
         cue = m.group(1)
     clean = _CUE_RE.sub("", text)
+    clean = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\[\[?[^\]]*\]?\]?', '', clean)
     return cue, clean
 
 
 # ── Markdown stripping for TTS ────────────────────────────────────────────────
 
 def _strip_markdown_for_tts(text: str) -> str:
-    """Strip markdown artifacts before text reaches the TTS engine."""
+    """Strip markdown artifacts and delivery cue tags before text reaches the TTS engine."""
     s = text
+    # CRITICAL: Remove [[cue]] delivery tags so they are NEVER spoken aloud
+    s = _CUE_RE.sub('', s)
+    s = re.sub(r'\[\[?[^\]]*\]?\]?', '', s)
+    s = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', s, flags=re.IGNORECASE)
     s = re.sub(r'^#{1,6}\s+', '', s, flags=re.MULTILINE)
     s = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', s)
     s = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', s)
@@ -251,6 +310,171 @@ async def _maybe_open_suggested_url(result: Any, emit: Emitter, log: Any = None)
     return result.model_copy(update={"data": merged_data})
 
 
+# ── Companion intent patterns ──────────────────────────────────────────────────
+import re as _re
+
+_COMPANION_START_PATTERNS = _re.compile(
+    r'\b(companion mode|be my companion|watch (what|me)|screen companion|'
+    r'start companion|companion on|activate companion)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_GAMING_PATTERNS = _re.compile(
+    r'\b(gaming companion|game companion|watch me (play|game)|'
+    r'help me (play|game)|companion (for |while )?gaming)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_CODING_PATTERNS = _re.compile(
+    r'\b(coding companion|code companion|watch me code|'
+    r'help me code|companion (for |while )?coding)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_WRITING_PATTERNS = _re.compile(
+    r'\b(writing companion|watch me write|'
+    r'help me write|companion (for |while )?writing)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_STOP_PATTERNS = _re.compile(
+    r'\b(stop companion|companion off|deactivate companion|'
+    r'go back to normal|no more companion|disable companion|quit companion)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_PAUSE_PATTERNS = _re.compile(
+    r'\b(pause companion|companion pause|mute companion|quiet companion|'
+    r'stop watching|stop observing)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_RESUME_PATTERNS = _re.compile(
+    r'\b(resume companion|companion resume|unmute companion|'
+    r'start watching again|companion back|unpause companion)\b',
+    _re.IGNORECASE,
+)
+_COMPANION_SCREEN_QUERY_PATTERNS = _re.compile(
+    r'\b('
+    # Direct screen-look requests
+    r'(look at|check|analyze|see) (the |my )?(screen|image|display|window)|'
+    r'what\'?s? (on|wrong with|happening on) (my |the )?screen|'
+    r'(tell|show) me what\'?s? (on|wrong|happening)|'
+    # Error/issue questions (screen-directed)
+    r'what\'?s? (wrong|the problem|the issue|the error|the bug|broken|going on) (here|with this|in this)|'
+    r'what does this (error|message|warning|code|text|thing) (mean|say)|'
+    r'explain this (error|message|code|warning|issue|problem)|'
+    r'why (is this|am i getting) (error|fail|wrong|broken)|'
+    # What/what is questions pointing at screen
+    r'what is (this|that|going on)|'
+    r'(look at|see) (this|what\'?s? here)|'
+    # Help/review requests
+    r'is this (correct|right|a bug|an error|wrong|good|okay)|'
+    r'help me (with|understand|fix) this|'
+    r'review (this|what\'?s? on screen)|'
+    # Deal/recommendation (shopping, etc.)
+    r'is this a good (deal|price|option|choice)|'
+    r'should i (buy|click|accept|press|do) this'
+    r')\b',
+    _re.IGNORECASE,
+)
+
+
+async def _route_companion_intent(
+    text: str,
+    emit: Emitter,
+    settings: "Settings",
+) -> bool:
+    """Route companion voice commands without calling the LLM.
+
+    Returns True if the intent was handled (caller should return immediately).
+    Returns False if the text is not a companion command (caller continues normally).
+    """
+    try:
+        from .companion.manager import companion_manager, CompanionSubMode
+        from .companion.capture import screen_capture
+        from .companion.vision import VisionService
+
+        reply: Optional[str] = None
+        action: Optional[str] = None
+        sub_mode: CompanionSubMode = CompanionSubMode.GENERAL
+
+        # On-demand Quick Look screen query ("see current image", "what is the mistake", "what's wrong here?")
+        if _COMPANION_SCREEN_QUERY_PATTERNS.search(text):
+            companion_manager.set_emit(emit)
+            await companion_manager.quick_look(question=text)
+            return True
+
+        # Gaming companion
+        elif _COMPANION_GAMING_PATTERNS.search(text):
+            reply = "Gaming companion mode activated! I'll watch your game and cheer you on."
+            action = "start"
+            sub_mode = CompanionSubMode.GAMING
+
+        # Coding companion
+        elif _COMPANION_CODING_PATTERNS.search(text):
+            reply = "Coding companion mode! I'll keep an eye out for errors and give you a nudge when needed."
+            action = "start"
+            sub_mode = CompanionSubMode.CODING
+
+        # Writing companion
+        elif _COMPANION_WRITING_PATTERNS.search(text):
+            reply = "Writing companion mode! I'll quietly look out for typos and give you space to think."
+            action = "start"
+            sub_mode = CompanionSubMode.WRITING
+
+        # General companion start
+        elif _COMPANION_START_PATTERNS.search(text):
+            reply = "Companion mode on! I'll watch what you're doing and jump in when something interesting happens."
+            action = "start"
+            sub_mode = CompanionSubMode.GENERAL
+
+        # Stop companion
+        elif _COMPANION_STOP_PATTERNS.search(text):
+            if companion_manager.mode.value != "off":
+                reply = "Companion mode off. Back to normal — just ask if you need anything."
+                action = "stop"
+            else:
+                reply = "Companion mode isn't running."
+
+        # Pause companion
+        elif _COMPANION_PAUSE_PATTERNS.search(text):
+            if companion_manager.mode.value == "active":
+                reply = "Companion paused. I'll stop watching for now."
+                action = "pause"
+            else:
+                reply = "Companion mode isn't active right now."
+
+        # Resume companion
+        elif _COMPANION_RESUME_PATTERNS.search(text):
+            if companion_manager.mode.value == "paused":
+                reply = "Companion resumed! Back to watching."
+                action = "resume"
+
+        if reply:
+            # Emit delta first (without final) so pipeline's capturing_emit feeds TTS queue
+            await emit({"type": "assistant_text", "delta": reply})
+            await emit({"type": "assistant_text", "final": True})
+
+            # Bind the current session's emit so companion_state messages
+            # reach the WebSocket client (without this, _emit is _noop_emit)
+            companion_manager.set_emit(emit)
+
+            if action == "start":
+                await companion_manager.start(sub_mode=sub_mode)
+            elif action == "stop":
+                await companion_manager.stop()
+            elif action == "pause":
+                await companion_manager.pause()
+            elif action == "resume":
+                await companion_manager.resume()
+
+            return True
+
+    except Exception as exc:
+        # Companion routing failure must never prevent normal Genie from responding
+        structlog.get_logger("genie.orchestrator").warning(
+            "companion_intent_routing_error", error=str(exc)
+        )
+
+    return False
+
+
+
 # ── Main turn handler ─────────────────────────────────────────────────────────
 
 async def handle_user_turn(
@@ -312,17 +536,38 @@ async def handle_user_turn(
 
     session.history.append({"role": "user", "content": tagged_text})
     
+    # ── Companion Mode intent routing (rule-based, zero LLM cost) ────────────
+    # Pattern-match before hitting the LLM so companion start/stop/pause are
+    # instant and don't waste tokens.
+    companion_handled = await _route_companion_intent(resolved_text, emit, settings)
+    if companion_handled:
+        return
+
     # Local intent routing is now handled by the engine's IntentAnalyzer.
     # The orchestrator only handles full LLM-routed turns.
 
     system_prompt = load_system_prompt()
     context_summary = context.get_context_summary()
     peak_context = build_peak_context_packet(resolved_text, session.session_id)
+
+    # ── Memory context injection (non-blocking, best-effort) ─────────────────
+    memory_context = ""
+    try:
+        mem_mgr = get_memory_manager()
+        memory_context = await mem_mgr.retrieve_for_context(
+            query=resolved_text,
+            limit=4,
+        )
+    except Exception as _mem_exc:
+        log.debug("memory_retrieve_skipped", error=str(_mem_exc))
+
     full_prompt_parts = [system_prompt]
     if context_summary:
         full_prompt_parts.append(context_summary)
     if peak_context:
         full_prompt_parts.append(peak_context)
+    if memory_context:
+        full_prompt_parts.append(f"## Relevant Memory\n{memory_context}")
     full_prompt = "\n\n".join(full_prompt_parts)
 
     messages = [{"role": "system", "content": full_prompt}] + _trim_history(session.history)
@@ -423,6 +668,7 @@ async def handle_user_turn(
             tool_calls_made = False
             iteration_text: list[str] = []
             sentence_buffer = ""
+            tag_filter = StreamTagFilter()
 
             async for event in llm_client.stream_chat(
                 messages=messages, tools=TOOL_SCHEMAS, settings=settings,
@@ -438,8 +684,8 @@ async def handle_user_turn(
                     delta = event["delta"]
                     iteration_text.append(delta)
 
-                    # Parse cue tags before sending delta to frontend
-                    cue_in_delta, clean_delta = extract_cue(delta)
+                    # Filter emotion tags robustly across token boundaries
+                    clean_delta, cue_in_delta = tag_filter.push(delta)
                     if cue_in_delta != "neutral":
                         current_cue = cue_in_delta
 
@@ -448,31 +694,27 @@ async def handle_user_turn(
                         final_answer_parts.append(clean_delta)
                         await emit({"type": "assistant_text", "delta": clean_delta, "final": False})
 
-                    # Accumulate raw text for sentence boundary detection
-                    sentence_buffer += delta
-                    match = re.search(r'([.?!।]\s+)', sentence_buffer)
+                    # Accumulate CLEAN text (no [[cue]] tags) for sentence boundary detection
+                    # This ensures [[warm]], [[urgent]], etc. are NEVER sent to TTS
+                    sentence_buffer += clean_delta
+                    match = re.search(r'([.?!।]\s+|\n+)', sentence_buffer)
                     while match:
                         split_idx = match.end()
-                        raw_sentence = sentence_buffer[:split_idx].strip()
-                        if raw_sentence:
-                            # Extract cue from the full sentence for TTS prosody
-                            sent_cue, clean_sentence = extract_cue(raw_sentence)
-                            if sent_cue != "neutral":
-                                current_cue = sent_cue
-                            if clean_sentence:
-                                if not first_chunk_emitted:
-                                    await emit({"type": "orb_state", "state": "speaking"})
-                                    await emit({"type": "tts_playing"})
-                                    first_chunk_emitted = True
-                                task = asyncio.create_task(
-                                    generate_tts(clean_sentence, current_cue, any_tools_used)
-                                )
-                                background_tasks.add(task)
-                                task.add_done_callback(background_tasks.discard)
-                                await tts_queue.put((task, sentence_seq, current_cue))
-                                sentence_seq += 1
+                        clean_sentence = sentence_buffer[:split_idx].strip()
+                        if clean_sentence:
+                            if not first_chunk_emitted:
+                                await emit({"type": "orb_state", "state": "speaking"})
+                                await emit({"type": "tts_playing"})
+                                first_chunk_emitted = True
+                            task = asyncio.create_task(
+                                generate_tts(clean_sentence, current_cue, any_tools_used)
+                            )
+                            background_tasks.add(task)
+                            task.add_done_callback(background_tasks.discard)
+                            await tts_queue.put((task, sentence_seq, current_cue))
+                            sentence_seq += 1
                         sentence_buffer = sentence_buffer[split_idx:]
-                        match = re.search(r'([.?!।]\s+)', sentence_buffer)
+                        match = re.search(r'([.?!।]\s+|\n+)', sentence_buffer)
 
                 elif etype == "tool_call":
                     tool_calls_made = True
@@ -481,18 +723,53 @@ async def handle_user_turn(
                     await _run_tool_call(event, session, messages, emit, settings, log)
                     
                 elif etype == "error":
-                    # Emit as a system note — NOT added to final_answer_parts
-                    # and NOT sent to TTS. These are provider-switch notices
-                    # (e.g. "Cloud AI is busy. Using offline Genie.") and
-                    # must never be spoken aloud or included in the assistant reply.
                     msg_text = event.get("message", "Error")
                     await emit({"type": "system_note", "message": msg_text})
+
+            # Flush any remaining tokens buffered in tag_filter
+            flushed_delta, flushed_cue = tag_filter.flush()
+            if flushed_cue != "neutral":
+                current_cue = flushed_cue
+            if flushed_delta:
+                final_answer_parts.append(flushed_delta)
+                await emit({"type": "assistant_text", "delta": flushed_delta, "final": False})
+                sentence_buffer += flushed_delta
 
             if not tool_calls_made:
                 break
 
             if iteration == MAX_TOOL_ITERATIONS - 1:
                 log.warning("tool_iteration_cap_reached", max=MAX_TOOL_ITERATIONS)
+                # Force a final synthesis: inject a user-invisible instruction
+                # so the model MUST produce a text answer from what it found.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM: You have used the maximum number of tool calls. "
+                        "Do NOT call any more tools. "
+                        "Using ONLY the information from the tool results above, "
+                        "give the user a direct, helpful spoken answer right now. "
+                        "If the information is incomplete, say what you found and acknowledge the gap.]"
+                    ),
+                })
+                # One final LLM call — tools disabled so it MUST produce text
+                async for event in llm_client.stream_chat(
+                    messages=messages, tools=None, settings=settings,
+                    cancel_token=_cancel,
+                ):
+                    if _cancel and _cancel.is_cancelled:
+                        break
+                    etype = event["type"]
+                    if etype == "text_delta":
+                        delta = event["delta"]
+                        _, clean_delta = extract_cue(delta)
+                        if clean_delta:
+                            final_answer_parts.append(clean_delta)
+                            await emit({"type": "assistant_text", "delta": clean_delta, "final": False})
+                            sentence_buffer += clean_delta
+
+                    elif etype == "error":
+                        await emit({"type": "system_note", "message": event.get("message", "")})
 
         # Flush remaining sentence buffer
         if sentence_buffer.strip():
@@ -545,6 +822,20 @@ async def handle_user_turn(
         context.update_context(text, tool_calls_in_turn)
         await asyncio.to_thread(record_turn_memory, session.session_id, text, final_text)
 
+        # ────────────── Memory recording (non-blocking, fire-and-forget) ────────────────
+        if final_text:
+            async def _record_memory():
+                try:
+                    mem_mgr = get_memory_manager()
+                    await mem_mgr.record_turn(
+                        user_text=text,
+                        assistant_text=final_text,
+                        session_id=session.session_id,
+                    )
+                except Exception as _e:
+                    pass  # memory failure never blocks the turn
+            asyncio.create_task(_record_memory())
+
         log.info("turn_end", response_length=len(final_text), tools_used=len(tool_calls_in_turn))
         await emit({"type": "orb_state", "state": "idle"})
         
@@ -552,6 +843,15 @@ async def handle_user_turn(
         # to prevent microphone echo loops during audio playback.
     except asyncio.CancelledError:
         log.info("turn_cancelled")
+        
+        # Aggressively clear the TTS queue to prevent audio leaks on barge-in
+        while not tts_queue.empty():
+            try:
+                _ = tts_queue.get_nowait()
+                tts_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+                
         consumer_task.cancel()
         for t in background_tasks:
             t.cancel()
@@ -643,16 +943,39 @@ async def _run_tool_call(
 
 async def _handle_vision_result(result: Any, messages: list[dict], settings: Settings) -> None:
     data = result.data
-    try:
-        answer = await llm_client.vision_describe(
-            image_base64=data["image_base64"],
-            image_mime=data["image_mime"],
-            question=data.get("question") or "Describe what's on screen.",
-            settings=settings,
+    # Check if the current provider supports vision before attempting the call
+    provider_id = llm_client.get_provider_config(settings).id
+    _vision_unsupported = {"groq"}  # providers that don't support image input
+
+    answer = ""
+    if provider_id in _vision_unsupported:
+        _stdlib_log.info(
+            "Vision skipped — provider '%s' does not support multimodal. "
+            "Using OCR text fallback if available.", provider_id
         )
-    except Exception as exc:  # noqa: BLE001
-        _stdlib_log.warning("Vision call failed: %s", exc)
-        answer = f"I captured the screen but couldn't analyze it: {exc}"
+        # Use OCR text extracted by the tool if available
+        ocr_text = data.get("ocr_text") or data.get("text") or ""
+        if ocr_text:
+            answer = f"Screen text (OCR): {ocr_text[:3000]}"
+        else:
+            answer = (
+                "Screen captured but vision is not available for the current AI provider. "
+                "Use search_web to look up the information instead."
+            )
+    else:
+        try:
+            answer = await llm_client.vision_describe(
+                image_base64=data["image_base64"],
+                image_mime=data["image_mime"],
+                question=data.get("question") or "Describe what's on screen.",
+                settings=settings,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _stdlib_log.warning("Vision call failed: %s", exc)
+            answer = (
+                "Screen captured but vision analysis failed. "
+                "Use search_web to look up the information instead."
+            )
 
     messages.append({
         "role": "tool",

@@ -430,7 +430,10 @@ class ConversationEngine:
 
         # Stop audio playback on frontend
         if self._playback:
-            await self._playback.interrupt()
+            res = self._playback.interrupt()
+            if asyncio.iscoroutine(res):
+                await res
+
 
         # Emit interrupt to frontend
         if self._emit:

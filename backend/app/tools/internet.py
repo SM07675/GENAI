@@ -57,11 +57,27 @@ _QUERY_NOISE = re.compile(
 @tool
 def search_web(query: str, max_results: int = 5) -> ToolResult:
     """Search the internet for live information to answer questions.
+    Tavily (advanced) is tried first; falls back to Google CSE, then DuckDuckGo.
 
     :param query: The search query. Keep it concise for better results.
     :param max_results: Maximum number of results to return.
     """
     max_results = max(1, min(int(max_results), 10))
+
+    # --- Priority 1: Tavily (advanced depth, full content extraction) ------
+    if api_manager.is_configured("tavily"):
+        try:
+            results = _tavily_search(query, max_results=max_results)
+            if results:
+                return ToolResult(
+                    status="ok",
+                    message=f"Found {len(results)} search results.",
+                    data={"results": results, "provider": "tavily"},
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.info("Tavily search failed, falling back to Google CSE: %s", e)
+
+    # --- Priority 2: Google CSE -------------------------------------------
     if api_manager.is_configured("google_cse") and api_manager.settings.google_cse_cx:
         try:
             data = api_manager.get_json(
@@ -249,7 +265,7 @@ def get_news_briefing(
 def get_api_status(provider: str = "all") -> ToolResult:
     """Check which external API providers are configured and their last health state.
 
-    :param provider: all, youtube, google_cse, newsapi, gnews, thenewsapi, or spotify.
+    :param provider: all, tavily, youtube, google_cse, newsapi, gnews, thenewsapi, or spotify.
     """
     status = api_manager.status()
     key = provider.strip().lower()
@@ -277,6 +293,17 @@ def _fetch_news_articles(
 
     provider_order = _provider_order(provider)
     errors: list[str] = []
+
+    # --- Priority 0: Tavily News (when configured) -------------------------
+    if provider in {"auto", "tavily"} and api_manager.is_configured("tavily"):
+        try:
+            articles = _tavily_news(topic, max_results=max_results)
+            articles = _dedup_articles(articles)[:max_results]
+            if articles:
+                return articles, "tavily"
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Tavily news failed, falling back to other providers: %s", exc)
+
     for candidate in provider_order:
         try:
             articles: list[dict[str, Any]] = []
@@ -303,6 +330,9 @@ def _fetch_news_articles(
 def _provider_order(provider: str) -> list[str]:
     if provider in {"newsapi", "gnews", "thenewsapi", "rss", "ddg"}:
         return [provider, "rss"] if provider != "rss" else ["rss"]
+    # "tavily" handled separately before this list (see _fetch_news_articles)
+    if provider == "tavily":
+        return ["rss", "ddg"]
 
     order: list[str] = []
     if api_manager.is_configured("newsapi"):
@@ -510,6 +540,74 @@ def _duckduckgo_html_search(query: str, max_results: int) -> list[dict[str, Any]
         headers={"User-Agent": "Genie/1.0"},
     )
     return _parse_duckduckgo_html_results(html_text, max_results=max_results)
+
+
+def _tavily_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    """Run a Tavily advanced web search and return normalised result dicts."""
+    from tavily import TavilyClient  # noqa: PLC0415
+
+    key = api_manager.api_key("tavily")
+    if not key:
+        raise RuntimeError("TAVILY_API_KEY is not configured.")
+
+    client = TavilyClient(key)
+    response = client.search(
+        query=query,
+        search_depth="advanced",
+        max_results=max_results,
+    )
+
+    results: list[dict[str, Any]] = []
+    for item in (response.get("results") or []):
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        body = (item.get("content") or item.get("snippet") or "").strip()
+        if title and url:
+            results.append({
+                "title": title,
+                "url": url,
+                "body": body[:500],
+                "source": _source_from_url(url),
+                "provider": "Tavily",
+            })
+    return results
+
+
+def _tavily_news(topic: str, max_results: int = 5) -> list[dict[str, Any]]:
+    """Run a Tavily news search and return normalised article dicts."""
+    from tavily import TavilyClient  # noqa: PLC0415
+
+    key = api_manager.api_key("tavily")
+    if not key:
+        raise RuntimeError("TAVILY_API_KEY is not configured.")
+
+    client = TavilyClient(key)
+    query = topic if topic.lower() not in {"latest", "top", "headlines", "breaking", "today"} else "latest news"
+    response = client.search(
+        query=query,
+        search_depth="advanced",
+        topic="news",
+        max_results=max_results,
+    )
+
+    articles: list[dict[str, Any]] = []
+    for item in (response.get("results") or []):
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        description = (item.get("content") or "").strip()
+        published_at = (item.get("published_date") or "").strip()
+        if title and url:
+            articles.append({
+                "title": title,
+                "source": _source_from_url(url),
+                "author": "",
+                "description": description[:300],
+                "url": url,
+                "image_url": "",
+                "published_at": published_at,
+                "provider": "Tavily",
+            })
+    return articles
 
 
 def _parse_duckduckgo_html_results(html_text: str, max_results: int) -> list[dict[str, Any]]:

@@ -136,7 +136,15 @@ export function useVoicePipeline() {
     ].includes(genieState);
 
     if (isCancellable) {
-      console.log("[GENIE-VOICE] Manual cancel — voiceState:", voiceState, "genieState:", genieState);
+      console.log("[GENIE-VOICE] ⚡ Manual cancel — stopping audio and resetting UI state instantly");
+      // Fast local stop — kill audio playback and state immediately (<1ms)
+      stopAllAudio();
+      useAppStore.setState({
+        isTTSPlaying: false,
+        genieState: "sleeping",
+        voiceState: "idle",
+        liveTranscript: "",
+      });
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "cancel" }));
       }
@@ -147,6 +155,7 @@ export function useVoicePipeline() {
       }
     }
   }, []);
+
 
   // ════════════════════════════════════════════════════════════════════════
   // MOUNT / UNMOUNT

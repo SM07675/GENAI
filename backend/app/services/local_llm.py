@@ -164,7 +164,7 @@ class LocalLLM:
                             except (OSError, AttributeError):
                                 pass
 
-                sys.path.insert(0, str(legacy))
+                sys.path.append(str(legacy))
             try:
                 from llama_cpp import Llama
                 logger.info("Using llama_cpp from legacy site-packages: %s", legacy)
