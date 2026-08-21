@@ -52,6 +52,7 @@ ytmusicapi>=1.8.0
 litellm>=1.0.0
 qdrant-client>=1.7.0
 mem0ai>=0.0.10
+sentence-transformers>=3.0.0
 langgraph>=0.0.26
 langchain-core>=0.1.27
 

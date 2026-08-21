@@ -37,6 +37,7 @@ from .core.agents.companion_agent import companion_agent
 from .core.reflection_engine import reflection_engine
 from .core.event_bus import event_bus, GenieEvents
 from .core.memory.manager import get_memory_manager
+from .core.intent_guard import check_tool_intent
 from .tools import TOOL_SCHEMAS, execute_tool
 
 _stdlib_log = logging.getLogger("genie.orchestrator")
@@ -223,6 +224,8 @@ def extract_cue(text: str) -> tuple[str, str]:
     clean = _CUE_RE.sub("", text)
     clean = re.sub(r'\[\s*(neutral|warm|cheerful|empathetic|apologetic|urgent|focused|reassuring)\s*\]', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'\[\[?[^\]]*\]?\]?', '', clean)
+    # Collapse double-spaces left by tag removal and strip leading/trailing whitespace
+    clean = re.sub(r'  +', ' ', clean).strip()
     return cue, clean
 
 
@@ -528,18 +531,29 @@ async def handle_user_turn(
 
     from .conversation_manager import conversation_manager
     context = conversation_manager.get_context(session.session_id)
-    resolved_text = context.resolve_references(text)
-    
-    is_hindi = bool(re.search(r'[\u0900-\u097F]', resolved_text))
+
+    # CRITICAL: Do NOT mutate the user's transcript via resolve_references().
+    # The raw transcript is the authoritative source for intent classification
+    # and tool-gating. Reference resolution would change semantic meaning
+    # (e.g. "you" -> "I") which breaks intent detection.
+    # resolved_text is kept only for peak_context building, never for LLM input.
+    raw_transcript = text
+    resolved_text = text  # pass raw text to LLM — no mutation
+
+    is_hindi = bool(re.search(r'[\u0900-\u097F]', raw_transcript))
     lang_tag = "[Language: Hindi/Hinglish] " if is_hindi else "[Language: English] "
-    tagged_text = lang_tag + resolved_text
+    tagged_text = lang_tag + raw_transcript
+
+    log.info(
+        "voice_input",
+        raw_transcript=raw_transcript[:200],
+        language="hi" if is_hindi else "en",
+    )
 
     session.history.append({"role": "user", "content": tagged_text})
-    
+
     # ── Companion Mode intent routing (rule-based, zero LLM cost) ────────────
-    # Pattern-match before hitting the LLM so companion start/stop/pause are
-    # instant and don't waste tokens.
-    companion_handled = await _route_companion_intent(resolved_text, emit, settings)
+    companion_handled = await _route_companion_intent(raw_transcript, emit, settings)
     if companion_handled:
         return
 
@@ -584,6 +598,7 @@ async def handle_user_turn(
     background_tasks: set[asyncio.Task] = set()
     current_cue = "neutral"
     sentence_seq = 0
+    _tts_dedup: set[str] = set()  # prevent identical sentences from being synthesized twice
 
     # Timeout applied only to individual TTS synthesis tasks (not queue.get).
     # The consumer itself exits via:
@@ -701,7 +716,8 @@ async def handle_user_turn(
                     while match:
                         split_idx = match.end()
                         clean_sentence = sentence_buffer[:split_idx].strip()
-                        if clean_sentence:
+                        if clean_sentence and clean_sentence not in _tts_dedup:
+                            _tts_dedup.add(clean_sentence)
                             if not first_chunk_emitted:
                                 await emit({"type": "orb_state", "state": "speaking"})
                                 await emit({"type": "tts_playing"})
@@ -720,8 +736,11 @@ async def handle_user_turn(
                     tool_calls_made = True
                     any_tools_used = True
                     tool_calls_in_turn.append(event)
-                    await _run_tool_call(event, session, messages, emit, settings, log)
-                    
+                    await _run_tool_call(
+                        event, session, messages, emit, settings, log,
+                        raw_user_text=raw_transcript,
+                    )
+
                 elif etype == "error":
                     msg_text = event.get("message", "Error")
                     await emit({"type": "system_note", "message": msg_text})
@@ -776,7 +795,8 @@ async def handle_user_turn(
             sent_cue, clean_remaining = extract_cue(sentence_buffer.strip())
             if sent_cue != "neutral":
                 current_cue = sent_cue
-            if clean_remaining:
+            if clean_remaining and clean_remaining not in _tts_dedup:
+                _tts_dedup.add(clean_remaining)
                 if not first_chunk_emitted:
                     await emit({"type": "orb_state", "state": "speaking"})
                     await emit({"type": "tts_playing"})
@@ -882,11 +902,43 @@ async def _run_tool_call(
     emit: Emitter,
     settings: Settings,
     log: Any = None,
+    raw_user_text: str = "",
 ) -> None:
-    """Execute a single finalised tool call and append its result to context."""
+    """Execute a single finalised tool call and append its result to context.
+
+    If ToolIntentGuard rejects the call, the tool is skipped and the LLM
+    continues to generate a conversational response (no tool result injected).
+    """
     name = event.get("name") or "<unknown>"
     args = event.get("arguments") or {}
     call_id = event.get("id") or name
+
+    # ── Intent Guard: check before execution ──────────────────────────────────
+    allowed, guard_reason = check_tool_intent(name, args, raw_user_text)
+    if not allowed:
+        _log = log or structlog.get_logger("genie.orchestrator")
+        _log.info(
+            "tool_rejected",
+            tool=name,
+            args=args,
+            reason=guard_reason,
+            user_text=raw_user_text[:100],
+        )
+        await emit({
+            "type": "tool_rejected",
+            "name": name,
+            "reason": guard_reason,
+        })
+        # Inject a system note so the LLM knows the tool was not executed.
+        # This prevents the LLM from claiming it performed an action it didn't.
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": f'{{"status": "skipped", "reason": "{guard_reason}", '
+                       f'"message": "Tool was not executed \u2014 no explicit user intent detected. '
+                       f'Please respond conversationally without claiming any action was performed."}}',
+        })
+        return
 
     if log:
         log.info("tool_start", tool=name, args=args)
@@ -907,9 +959,9 @@ async def _run_tool_call(
     await emit({"type": "tool_end", "name": name, "result": result.model_dump()})
 
     # Intercept media commands
-    action = result.data.get("action")
+    action = result.data.get("action") if result.data else None
     if action == "play_media":
-        media_msg = {"type": "play_media"}
+        media_msg: dict = {"type": "play_media"}
         if "video_id" in result.data:
             media_msg["video_id"] = result.data["video_id"]
         if "playlist_id" in result.data:

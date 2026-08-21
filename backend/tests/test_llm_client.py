@@ -71,11 +71,11 @@ def test_gemini_fallback_used_for_failed_non_gemini_provider():
     assert fallback.llm_provider == "gemini"
 
 
-def test_nvidia_provider_uses_gemma_4_31b():
+def test_nvidia_provider_uses_minimax_m3():
     settings = Settings(
         llm_provider="nvidia",
         nvidia_api_key="nvapi-test-key",
-        nvidia_model="google/gemma-4-31b-it",
+        nvidia_model="minimaxai/minimax-m3",
     )
     provider = get_provider_config(settings)
 
@@ -83,5 +83,5 @@ def test_nvidia_provider_uses_gemma_4_31b():
     assert provider.label == "Nvidia"
     assert provider.api_key == "nvapi-test-key"
     assert provider.base_url == "https://integrate.api.nvidia.com/v1"
-    assert provider.model == "google/gemma-4-31b-it"
+    assert provider.model == "minimaxai/minimax-m3"
 

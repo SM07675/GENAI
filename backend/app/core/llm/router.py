@@ -14,7 +14,7 @@ log = logging.getLogger("genie_os.llm")
 class LLMRouter:
     def __init__(self):
         # Default model for standard tasks
-        self.default_model = "google/gemma-4-31b-it"
+        self.default_model = "meta/llama-3.1-8b-instruct"
         
     async def generate(self, messages: List[Dict[str, str]], model: str = None, **kwargs) -> Any:
         """Standard async generation."""

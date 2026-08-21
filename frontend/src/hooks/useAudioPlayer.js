@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useAppStore } from "../store/appStore";
 import { resumeAnalyser } from "../services/audioAnalyser";
+import { glog } from "../utils/logger";
 
 const MIN_AUDIO_B64_LENGTH = 100; // Minimum base64 length for a valid MP3 frame
 
@@ -53,7 +54,7 @@ export function useAudioPlayer(externalAudioRef) {
 
     if (!isPlayingRef.current && queueRef.current.length === 0) {
       // Nothing is queued or playing — complete immediately
-      console.log("[AudioPlayer] tts_done with empty queue → playback_complete immediately");
+      glog("[AudioPlayer] tts_done with empty queue → playback_complete immediately");
       _sendPlaybackComplete();
       return;
     }
@@ -61,7 +62,7 @@ export function useAudioPlayer(externalAudioRef) {
     // Audio is still playing — let it drain naturally.
     // Set a generous safety timer in case the onended event never fires (Electron bug).
     // 12s gives even long responses time to finish; the guard prevents double-firing.
-    console.log("[AudioPlayer] tts_done received — audio still playing, will complete on drain");
+    glog("[AudioPlayer] tts_done received — audio still playing, will complete on drain");
     clearSafetyTimer();
     safetyTimerRef.current = setTimeout(() => {
       if (!playbackSentRef.current) {
@@ -80,7 +81,7 @@ export function useAudioPlayer(externalAudioRef) {
       if (playbackSentRef.current) return; // guard: never send twice per turn
       playbackSentRef.current = true;
       clearSafetyTimer();
-      console.log("[AudioPlayer] ✅ playback_complete sent");
+      glog("[AudioPlayer] ✅ playback_complete sent");
       
       // Update local state instantly so UI drops 'speaking' state immediately
       const currentGenie = useAppStore.getState().genieState;
@@ -103,7 +104,7 @@ export function useAudioPlayer(externalAudioRef) {
     const playNext = () => {
       if (queueRef.current.length > 0) {
         const next = queueRef.current.shift();
-        console.log("[AudioPlayer] Playing next chunk", {
+        glog("[AudioPlayer] Playing next chunk", {
           remaining: queueRef.current.length,
           seq: next.seq,
         });
@@ -123,7 +124,7 @@ export function useAudioPlayer(externalAudioRef) {
           sendPlaybackComplete();
         } else {
           // Audio drained but tts_done not yet received. Safety timeout: 1.5s
-          console.log("[AudioPlayer] Queue empty — waiting for tts_done (safety: 8s)");
+          glog("[AudioPlayer] Queue empty — waiting for tts_done (safety: 8s)");
           clearSafetyTimer();
           safetyTimerRef.current = setTimeout(() => {
             if (!playbackSentRef.current) {
@@ -227,7 +228,7 @@ export function useAudioPlayer(externalAudioRef) {
     const blobUrl = createBlobUrl(audio, mime);
     if (!blobUrl) return;
 
-    console.log("[AudioPlayer] Chunk queued", {
+    glog("[AudioPlayer] Chunk queued", {
       seq, mime,
       isPlaying: isPlayingRef.current,
       queueLen: queueRef.current.length,
@@ -273,7 +274,7 @@ export function useAudioPlayer(externalAudioRef) {
 
   // ── Stop all audio immediately (barge-in / cancel) ─────────────────────────
   const stopAudio = useCallback(() => {
-    console.log("[AudioPlayer] stopAudio called", {
+    glog("[AudioPlayer] stopAudio called", {
       queuedChunks: queueRef.current.length,
     });
     clearSafetyTimer();

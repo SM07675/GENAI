@@ -31,15 +31,24 @@ class EngineState(str, Enum):
     The pipeline follows this cycle:
         IDLE → WAIT_WAKE → LISTENING → UNDERSTANDING → THINKING
              → STREAMING_RESPONSE → SPEAKING → RETURN_TO_LISTENING → WAIT_WAKE
+    Specialist/OS states:
+        SEARCHING, WORKING, WAITING, CONFIRMING, ERROR, STOPPED, COMPANION
     """
     IDLE = "idle"
     WAIT_WAKE = "wait_wake"
     LISTENING = "listening"
     UNDERSTANDING = "understanding"
     THINKING = "thinking"
+    SEARCHING = "searching"
+    WORKING = "working"
+    WAITING = "waiting"
+    CONFIRMING = "confirming"
     STREAMING_RESPONSE = "streaming_response"
     SPEAKING = "speaking"
     RETURN_TO_LISTENING = "return_to_listening"
+    COMPANION = "companion"
+    ERROR = "error"
+    STOPPED = "stopped"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -52,29 +61,90 @@ TRANSITIONS: dict[EngineState, set[EngineState]] = {
         EngineState.WAIT_WAKE,
         EngineState.LISTENING,
         EngineState.THINKING,
+        EngineState.COMPANION,
+        EngineState.STOPPED,
     },
     EngineState.WAIT_WAKE: {
         EngineState.LISTENING,       # wake word or manual wake
         EngineState.UNDERSTANDING,   # manual audio input
         EngineState.THINKING,        # text input / manual message submission
+        EngineState.COMPANION,       # companion mode active
+        EngineState.STOPPED,
         EngineState.IDLE,            # shutdown
+    },
+    EngineState.COMPANION: {
+        EngineState.LISTENING,       # wake word or ambient prompt
+        EngineState.UNDERSTANDING,
+        EngineState.THINKING,
+        EngineState.SPEAKING,        # companion proactive comment
+        EngineState.WAIT_WAKE,
+        EngineState.STOPPED,
+        EngineState.IDLE,
     },
     EngineState.LISTENING: {
         EngineState.UNDERSTANDING,   # speech captured
         EngineState.THINKING,        # text input while listening
         EngineState.WAIT_WAKE,       # silence timeout, no speech
+        EngineState.COMPANION,
+        EngineState.STOPPED,
         EngineState.IDLE,            # shutdown
     },
     EngineState.UNDERSTANDING: {
         EngineState.THINKING,        # transcript ready
         EngineState.LISTENING,       # empty/cancelled transcript → re-listen
         EngineState.WAIT_WAKE,       # cancelled, return to wake
+        EngineState.COMPANION,
+        EngineState.STOPPED,
         EngineState.IDLE,
     },
     EngineState.THINKING: {
         EngineState.STREAMING_RESPONSE,  # LLM starts generating
+        EngineState.SEARCHING,           # tool/web retrieval
+        EngineState.WORKING,             # agent task execution
+        EngineState.CONFIRMING,          # high-risk action confirmation
         EngineState.LISTENING,           # barge-in interrupt
         EngineState.WAIT_WAKE,           # error/cancel
+        EngineState.ERROR,
+        EngineState.STOPPED,
+        EngineState.IDLE,
+    },
+    EngineState.SEARCHING: {
+        EngineState.THINKING,            # analysis after search
+        EngineState.WORKING,             # transition to action
+        EngineState.STREAMING_RESPONSE,  # search complete, stream results
+        EngineState.LISTENING,           # barge-in
+        EngineState.ERROR,
+        EngineState.STOPPED,
+        EngineState.WAIT_WAKE,
+        EngineState.IDLE,
+    },
+    EngineState.WORKING: {
+        EngineState.THINKING,            # evaluate step result
+        EngineState.SEARCHING,           # look up additional info
+        EngineState.CONFIRMING,          # risk gate
+        EngineState.WAITING,             # waiting on background task
+        EngineState.STREAMING_RESPONSE,  # work finished, stream response
+        EngineState.LISTENING,           # barge-in
+        EngineState.ERROR,
+        EngineState.STOPPED,
+        EngineState.WAIT_WAKE,
+        EngineState.IDLE,
+    },
+    EngineState.WAITING: {
+        EngineState.WORKING,             # task resumed
+        EngineState.THINKING,
+        EngineState.STREAMING_RESPONSE,
+        EngineState.LISTENING,
+        EngineState.STOPPED,
+        EngineState.IDLE,
+    },
+    EngineState.CONFIRMING: {
+        EngineState.WORKING,             # confirmed -> proceed with action
+        EngineState.THINKING,            # denied -> replan
+        EngineState.STREAMING_RESPONSE,  # report confirmation outcome
+        EngineState.LISTENING,
+        EngineState.STOPPED,
+        EngineState.WAIT_WAKE,
         EngineState.IDLE,
     },
     EngineState.STREAMING_RESPONSE: {
@@ -82,18 +152,36 @@ TRANSITIONS: dict[EngineState, set[EngineState]] = {
         EngineState.LISTENING,       # barge-in interrupt
         EngineState.WAIT_WAKE,       # no TTS output (text-only response)
         EngineState.RETURN_TO_LISTENING,  # response done, no audio
+        EngineState.COMPANION,
+        EngineState.STOPPED,
         EngineState.IDLE,
     },
     EngineState.SPEAKING: {
         EngineState.RETURN_TO_LISTENING,  # playback complete
         EngineState.LISTENING,           # barge-in interrupt
-        EngineState.WAIT_WAKE,           # error
+        EngineState.COMPANION,           # return to companion ambient
+        EngineState.WAIT_WAKE,           # error / return to wake
+        EngineState.STOPPED,
         EngineState.IDLE,
     },
     EngineState.RETURN_TO_LISTENING: {
         EngineState.LISTENING,       # follow-up mode (immediate re-listen)
         EngineState.WAIT_WAKE,       # no follow-up, return to wake
+        EngineState.COMPANION,       # return to companion ambient
+        EngineState.STOPPED,
         EngineState.IDLE,
+    },
+    EngineState.ERROR: {
+        EngineState.WAIT_WAKE,
+        EngineState.LISTENING,
+        EngineState.COMPANION,
+        EngineState.STOPPED,
+        EngineState.IDLE,
+    },
+    EngineState.STOPPED: {
+        EngineState.IDLE,
+        EngineState.WAIT_WAKE,
+        EngineState.COMPANION,
     },
 }
 
@@ -102,30 +190,43 @@ TRANSITIONS: dict[EngineState, set[EngineState]] = {
 STATE_TIMEOUTS: dict[EngineState, Optional[float]] = {
     EngineState.IDLE: None,
     EngineState.WAIT_WAKE: None,           # can wait forever
+    EngineState.COMPANION: None,           # ambient listening
+    EngineState.STOPPED: None,
     EngineState.LISTENING: 30.0,           # max 30s listening
     EngineState.UNDERSTANDING: 30.0,       # STT should finish in 30s
     EngineState.THINKING: 60.0,            # LLM should respond in 60s
+    EngineState.SEARCHING: 60.0,           # research/search timeout
+    EngineState.WORKING: 120.0,            # agent work timeout
+    EngineState.WAITING: 300.0,            # background wait timeout
+    EngineState.CONFIRMING: 120.0,         # human confirmation timeout
     EngineState.STREAMING_RESPONSE: 90.0,  # streaming can take a while
     EngineState.SPEAKING: 120.0,           # long responses
     EngineState.RETURN_TO_LISTENING: 5.0,  # should transition quickly
+    EngineState.ERROR: 10.0,               # auto-recover from error
 }
 
 # States where barge-in (interruption) is allowed.
 BARGEIN_STATES: frozenset[EngineState] = frozenset({
     EngineState.THINKING,
+    EngineState.SEARCHING,
+    EngineState.WORKING,
     EngineState.STREAMING_RESPONSE,
     EngineState.SPEAKING,
+    EngineState.CONFIRMING,
 })
 
 # States where the mic should be feeding the wake detector.
 WAKE_DETECTION_STATES: frozenset[EngineState] = frozenset({
     EngineState.WAIT_WAKE,
+    EngineState.COMPANION,
 })
 
 # States where VAD speech detection is active.
 VAD_ACTIVE_STATES: frozenset[EngineState] = frozenset({
     EngineState.LISTENING,
     EngineState.SPEAKING,   # for barge-in detection
+    EngineState.SEARCHING,
+    EngineState.WORKING,
 })
 
 # States considered "active processing" (for diagnostics).
@@ -133,6 +234,10 @@ ACTIVE_STATES: frozenset[EngineState] = frozenset({
     EngineState.LISTENING,
     EngineState.UNDERSTANDING,
     EngineState.THINKING,
+    EngineState.SEARCHING,
+    EngineState.WORKING,
+    EngineState.WAITING,
+    EngineState.CONFIRMING,
     EngineState.STREAMING_RESPONSE,
     EngineState.SPEAKING,
 })

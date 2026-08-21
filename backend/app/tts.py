@@ -48,6 +48,17 @@ _kokoro_pipeline: Optional[object] = None
 _kokoro_init_lock = threading.Lock()
 _kokoro_semaphore: Optional[asyncio.Semaphore] = None  # created lazily (needs event loop)
 
+# Compatibility aliases
+_tts_init_lock = _kokoro_init_lock
+_tts_inference_lock = threading.Lock()
+
+def _install_numba_shim() -> None:
+    """Safe numba shim for environments without numba installed."""
+    import sys
+    import types
+    if "numba" not in sys.modules:
+        sys.modules["numba"] = types.ModuleType("numba")
+
 # Chatterbox pipeline (loaded once, never reloaded)
 _chatterbox_pipeline: Optional[object] = None
 _chatterbox_init_lock = threading.Lock()

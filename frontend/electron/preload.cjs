@@ -18,9 +18,13 @@ contextBridge.exposeInMainWorld("genie", {
   setCompanionClickThrough: (ignore) =>
     ipcRenderer.send("companion:set-click-through", ignore),
 
-  // Show/hide the companion overlay window
-  showCompanion: () => ipcRenderer.send("companion:show"),
-  hideCompanion: () => ipcRenderer.send("companion:hide"),
+  // Show/hide the companion overlay window.
+  // These are invoke (not send) because the UI must wait for a real,
+  // verified result before it's allowed to claim "ACTIVE".
+  showCompanion: () => ipcRenderer.invoke("companion:show"),
+  hideCompanion: () => ipcRenderer.invoke("companion:hide"),
+  toggleCompanion: () => ipcRenderer.invoke("companion:toggle"),
+  getCompanionMode: () => ipcRenderer.invoke("companion:get-mode"),
 
   // Set display mode (resizes the companion window)
   setCompanionDisplayMode: (mode) =>
@@ -40,6 +44,7 @@ contextBridge.exposeInMainWorld("genie", {
   // ── Backend sidecar ────────────────────────────────────────────────────────
   getBackendStatus: () => ipcRenderer.invoke("backend:get-status"),
   getBackendPort: () => ipcRenderer.invoke("backend:get-port"),
+  getDesktopPin: () => ipcRenderer.invoke("backend:get-desktop-pin"),
 
   // ── Companion hotkeys / triggers ──────────────────────────────────────────
   triggerQuickLook: () => ipcRenderer.send("companion:trigger-quick-look"),
@@ -61,5 +66,21 @@ contextBridge.exposeInMainWorld("genie", {
     ipcRenderer.on("companion:display-mode-changed", handler);
     return () => ipcRenderer.removeListener("companion:display-mode-changed", handler);
   },
+  onCompanionModeChanged: (callback) => {
+    const handler = (_, state) => callback(state);
+    ipcRenderer.on("companion:mode-changed", handler);
+    return () => ipcRenderer.removeListener("companion:mode-changed", handler);
+  },
+  onCompanionAction: (callback) => {
+    const handler = (_, action) => callback(action);
+    ipcRenderer.on("companion:action", handler);
+    return () => ipcRenderer.removeListener("companion:action", handler);
+  },
+  onCompanionBackendControl: (callback) => {
+    const handler = (_, action) => callback(action);
+    ipcRenderer.on("companion:backend-control", handler);
+    return () => ipcRenderer.removeListener("companion:backend-control", handler);
+  },
+  publishCompanionState: (state) => ipcRenderer.send("companion:publish-state", state),
 });
 

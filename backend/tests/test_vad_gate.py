@@ -120,15 +120,14 @@ class TestVADGateEnergyFallback:
         gate = self._make_gate(min_speech_ms=32, cooldown_ms=0)
         fired = []
 
-        async def on_speech_start():
-            fired.append(time.time())
-
         active_flag = [True]
 
+        async def on_speech_start():
+            fired.append(time.time())
+            active_flag[0] = False  # Deactivate when speech start triggers barge-in
+
         async def _iter():
-            for i in range(6):
-                # Switch to inactive after first fire
-                active_flag[0] = (i < 2)
+            for _ in range(6):
                 yield VOICED_FRAME
 
         await gate.watch(_iter(), on_speech_start, lambda: active_flag[0])

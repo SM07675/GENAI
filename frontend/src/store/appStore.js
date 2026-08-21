@@ -19,6 +19,8 @@ export const GENIE_STATES = {
   LISTENING: "listening",
   TRANSCRIBING: "transcribing",
   THINKING: "thinking",
+  SEARCHING: "searching",
+  PLANNING: "planning",
   EXECUTING: "executing",
   SPEAKING: "speaking",
   FOLLOW_UP: "follow_up_listening",
@@ -30,14 +32,16 @@ export const GENIE_STATES = {
 const GENIE_STATE_TRANSITIONS = {
   initializing: ["idle", "offline", "error"],
   offline: ["initializing", "idle", "error"],
-  sleeping: ["waking", "idle", "offline", "error"],
+  sleeping: ["waking", "idle", "listening", "offline", "error"],
   waking: ["listening", "idle", "error"],
-  idle: ["sleeping", "waking", "listening", "thinking", "offline", "error"],
-  listening: ["transcribing", "idle", "interrupted", "error"],
-  transcribing: ["thinking", "idle", "interrupted", "error"],
-  thinking: ["executing", "speaking", "success", "idle", "interrupted", "error"],
-  executing: ["speaking", "success", "idle", "interrupted", "error"],
-  speaking: ["success", "follow_up_listening", "idle", "interrupted", "error"],
+  idle: ["sleeping", "waking", "listening", "thinking", "searching", "planning", "executing", "offline", "error"],
+  listening: ["transcribing", "thinking", "searching", "idle", "interrupted", "error"],
+  transcribing: ["thinking", "searching", "planning", "executing", "idle", "interrupted", "error"],
+  thinking: ["searching", "planning", "executing", "speaking", "success", "idle", "interrupted", "error"],
+  searching: ["thinking", "executing", "speaking", "success", "idle", "interrupted", "error"],
+  planning: ["executing", "thinking", "speaking", "success", "idle", "interrupted", "error"],
+  executing: ["thinking", "searching", "speaking", "success", "idle", "interrupted", "error"],
+  speaking: ["success", "follow_up_listening", "listening", "idle", "sleeping", "interrupted", "error"],
   follow_up_listening: ["listening", "idle", "sleeping", "interrupted", "error"],
   interrupted: ["listening", "idle", "sleeping"],
   success: ["idle", "sleeping"],
@@ -72,6 +76,9 @@ export const useAppStore = create((set, get) => ({
   ws: null,                         // active WebSocket instance
   wsStatus: "disconnected",         // disconnected|connecting|connected|authed|error
   publicUrl: null,                  // ngrok public URL (for mobile pairing)
+  sessionId: null,
+  visionSupported: null,
+  visionReason: null,
 
   // --- Conversation ----------------------------------------------------
   messages: [],                     // [{id, role:'user'|'assistant', text, ts, toolEvents:[]}]
@@ -84,6 +91,8 @@ export const useAppStore = create((set, get) => ({
   setWs: (ws) => set({ ws }),
   setWsStatus: (status) => set({ wsStatus: status }),
   setPublicUrl: (url) => set({ publicUrl: url }),
+  setSessionId: (sessionId) => set({ sessionId }),
+  setVisionSupport: (supported, reason = null) => set({ visionSupported: supported, visionReason: reason }),
 
   // --- Orb -------------------------------------------------------------
   setOrbState: (state) => set({ orbState: state }),
@@ -155,11 +164,11 @@ export const useAppStore = create((set, get) => ({
   stopBackgroundMedia: () => set({ backgroundMedia: null }),
 
   // --- Transcript actions ---------------------------------------------
-  pushUserMessage: (text) =>
+  pushUserMessage: (text, attachment = null) =>
     set((s) => ({
       messages: [
         ...s.messages,
-        { id: crypto.randomUUID(), role: "user", text, ts: Date.now() },
+        { id: crypto.randomUUID(), role: "user", text, attachment, ts: Date.now() },
       ],
     })),
 

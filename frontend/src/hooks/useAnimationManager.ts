@@ -4,6 +4,7 @@ import { useAnimations } from '@react-three/drei';
 import { AssistantState } from '../types';
 import { DEFAULT_STATE_MAPPINGS, DEFAULT_CROSSFADE_DURATION } from '../animation/AnimationState';
 import { mapStateToClipName } from '../utils/animationUtils';
+import { glog } from '../utils/logger';
 
 export interface UseAnimationManagerReturn {
   availableClips: string[];
@@ -64,7 +65,7 @@ export function useAnimationManager(
     const stateKey = String(assistantState).toLowerCase();
     const mappedTarget = DEFAULT_STATE_MAPPINGS[stateKey] || DEFAULT_STATE_MAPPINGS['idle'] || 'Idle';
 
-    console.log(`[AnimationController] State change: '${assistantState}' -> target clip: '${mappedTarget}'`);
+    glog(`[AnimationController] State change: '${assistantState}' -> target clip: '${mappedTarget}'`);
     playAnimation(mappedTarget);
   }, [assistantState, playAnimation]);
 

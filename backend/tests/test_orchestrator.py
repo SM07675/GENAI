@@ -39,7 +39,9 @@ class TestExtractCue:
     def test_invalid_cue_not_extracted(self):
         cue, text = extract_cue("[[angry]] This should stay.")
         assert cue == "neutral"
-        assert text == "[[angry]] This should stay."
+        # Unknown [[...]] tags are stripped from output (never spoken aloud)
+        # but the cue value stays "neutral" since "angry" isn't a valid cue.
+        assert text == "This should stay."
 
     def test_double_spaces_collapsed(self):
         cue, text = extract_cue("Hello [[warm]] world.")

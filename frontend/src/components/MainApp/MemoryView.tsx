@@ -1,13 +1,14 @@
 /**
  * MemoryView.tsx — Memory UI inside Main Application.
- *
- * Per spec §37:
- * Categories: Personal Preferences, Projects, Conversations, Tasks, Learned Preferences.
- * Actions: View, Search, Delete, Clear, Export.
- * Connects to actual local SQLite + Qdrant memory backend (`/api/v1/memory/search`).
  */
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import {
+  BrainIcon,
+  TrashIcon,
+  PlusIcon,
+  SparklesIcon,
+} from '../UI/Icons';
 
 interface MemoryItem {
   id: string;
@@ -21,14 +22,13 @@ export default function MemoryView() {
   const [query, setQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const [memories, setMemories] = useState<MemoryItem[]>([
-    { id: '1', content: 'User prefers Sky Blue light theme for interface.', category: 'Personal Preference', importance: 0.9, created_at: Date.now() - 3600000 },
-    { id: '2', content: 'Project Genie AI: Desktop companion overlay with floating transparent window.', category: 'Projects', importance: 0.85, created_at: Date.now() - 7200000 },
-    { id: '3', content: 'Use sentence-transformers all-MiniLM-L6-v2 for offline embeddings.', category: 'Learned Preferences', importance: 0.8, created_at: Date.now() - 86400000 },
+    { id: '1', content: 'User prefers Cyber Luxe dark glass theme for high contrast visual excellence.', category: 'Personal Preference', importance: 0.95, created_at: Date.now() - 3600000 },
+    { id: '2', content: 'Project Genie AI: Screen companion mode floating draggable transparent overlay window.', category: 'Projects', importance: 0.9, created_at: Date.now() - 7200000 },
+    { id: '3', content: 'Use sentence-transformers embeddings for local semantic memory vector retrieval.', category: 'Learned Preferences', importance: 0.85, created_at: Date.now() - 86400000 },
   ]);
 
   const categories = ['all', 'Personal Preference', 'Projects', 'Conversations', 'Tasks', 'Learned Preferences'];
 
-  // Search memories from backend API
   useEffect(() => {
     let isMounted = true;
     async function fetchMemories() {
@@ -71,44 +71,45 @@ export default function MemoryView() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-            Genie Memory & Preferences
+          <h1 className="text-2xl font-bold tracking-tight">
+            Genie AI Semantic Memory
           </h1>
-          <p className="text-sm font-medium text-slate-500 mt-1">
-            Semantic memory stored locally via sentence-transformers embeddings & SQLite.
+          <p className="text-xs md:text-sm font-medium text-slate-400 mt-1">
+            Long-term memory stored locally via sentence-transformers embeddings & SQLite.
           </p>
         </div>
 
         <button
           onClick={() => setMemories([])}
-          className="px-4 py-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold hover:bg-rose-100 transition-all"
+          className="px-4 py-2 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-bold hover:bg-rose-500/20 transition-all flex items-center gap-2"
         >
-          Clear Memory
+          <TrashIcon size={16} />
+          <span>Clear Memory</span>
         </button>
       </div>
 
       {/* Search & Category Filter */}
-      <div className="sky-glass rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="flex items-center gap-3 w-full md:w-96 px-3 py-2 rounded-xl bg-white border border-sky-200 shadow-sm">
-          <span>🔍</span>
+      <div className="cyber-glass rounded-3xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="flex items-center gap-3 w-full md:w-96 px-4 py-2.5 rounded-2xl bg-slate-900/80 border border-cyan-500/30 shadow-inner">
+          <BrainIcon size={18} className="text-cyan-400" />
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search memory semantically…"
-            className="w-full bg-transparent outline-none text-xs font-medium text-slate-800 placeholder:text-slate-400"
+            className="w-full bg-transparent outline-none text-xs font-medium text-slate-200 placeholder:text-slate-500"
           />
         </div>
 
-        <div className="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto custom-scrollbar">
+        <div className="flex items-center gap-2 overflow-x-auto w-full md:w-auto custom-scrollbar">
           {categories.map((cat) => (
             <button
               key={cat}
               onClick={() => setActiveCategory(cat)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold capitalize whitespace-nowrap transition-all ${
+              className={`px-3.5 py-2 rounded-2xl text-xs font-semibold capitalize whitespace-nowrap transition-all ${
                 activeCategory === cat
-                  ? 'bg-sky-500 text-white shadow-sm'
-                  : 'bg-white/70 text-slate-600 hover:bg-white border border-sky-200/60'
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-md shadow-cyan-500/30'
+                  : 'bg-white/5 text-slate-300 hover:bg-white/10 border border-white/10'
               }`}
             >
               {cat}
@@ -120,7 +121,7 @@ export default function MemoryView() {
       {/* Memory List */}
       <div className="space-y-3">
         {filteredMemories.length === 0 ? (
-          <div className="sky-glass-card rounded-2xl p-12 text-center text-slate-400 text-xs font-medium">
+          <div className="cyber-card rounded-3xl p-12 text-center text-slate-400 text-xs font-medium">
             No memories match your query. Talk to Genie or ask Genie to "remember" something!
           </div>
         ) : (
@@ -130,26 +131,26 @@ export default function MemoryView() {
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
-              className="sky-glass-card rounded-2xl p-4 flex items-center justify-between gap-4 hover:border-sky-300 transition-all"
+              className="cyber-card rounded-3xl p-5 flex items-center justify-between gap-4 hover:border-cyan-500/40 transition-all"
             >
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
-                  <span className="px-2.5 py-0.5 rounded-full bg-sky-100 border border-sky-300 text-[10px] font-bold text-sky-800 uppercase">
+                  <span className="px-3 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-[10px] font-bold text-cyan-400 uppercase">
                     {m.category}
                   </span>
                   <span className="text-[11px] font-semibold text-slate-400">
                     Importance: {Math.round(m.importance * 100)}%
                   </span>
                 </div>
-                <p className="text-xs font-semibold text-slate-800">{m.content}</p>
+                <p className="text-xs font-semibold text-slate-200 leading-relaxed">{m.content}</p>
               </div>
 
               <button
                 onClick={() => handleDelete(m.id)}
-                className="p-2 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-all"
+                className="p-2.5 rounded-2xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-all"
                 title="Delete memory"
               >
-                🗑
+                <TrashIcon size={16} />
               </button>
             </motion.div>
           ))

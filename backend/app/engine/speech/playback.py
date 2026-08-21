@@ -81,21 +81,31 @@ class PlaybackTracker:
 
         Returns True if playback completed normally, False if timed out
         or was interrupted.
+
+        Timeout is dynamic: base 8s + 3s per chunk sent, capped at 120s.
+        This accommodates long multi-sentence responses without being
+        indefinite. Logged as info (not warning) since timeout is often
+        the normal completion path when the frontend omits playback_complete.
         """
         if not self.has_audio:
             return True
 
+        # Dynamic timeout: give more time proportional to audio sent
+        dynamic_timeout = min(8.0 + self._chunks_sent * 3.0, 120.0)
+        effective_timeout = max(self._playback_timeout, dynamic_timeout)
+
         try:
             await asyncio.wait_for(
                 self._playback_complete.wait(),
-                timeout=self._playback_timeout,
+                timeout=effective_timeout,
             )
             return not self._interrupted
         except asyncio.TimeoutError:
-            log.warning(
-                "playback_timeout",
+            log.info(
+                "playback_timeout_recovery",
                 chunks_sent=self._chunks_sent,
-                timeout=self._playback_timeout,
+                timeout=round(effective_timeout, 1),
+                note="Frontend did not send playback_complete — proceeding normally",
             )
             pipeline_metrics.increment("playback.timeouts")
             return False

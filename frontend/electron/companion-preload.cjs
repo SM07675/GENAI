@@ -20,15 +20,30 @@ contextBridge.exposeInMainWorld('genie', {
   setDisplayMode: (mode) =>
     ipcRenderer.send('companion:set-display-mode', mode),
 
+  setExpanded: (expanded) =>
+    ipcRenderer.send('companion:set-expanded', expanded),
+
+  setAlwaysOnTop: (enabled) =>
+    ipcRenderer.send('companion:set-always-on-top', enabled),
+
   setPosition: (x, y) =>
     ipcRenderer.send('companion:set-position', { x, y }),
 
   getBounds: () =>
     ipcRenderer.invoke('companion:get-bounds'),
 
-  // Focus the main Genie window
+  // Return to the main Genie window (also exits Companion Mode)
   focusMain: () =>
     ipcRenderer.send('window:focus-main'),
+
+  exitCompanion: () =>
+    ipcRenderer.invoke('companion:hide'),
+
+  sendCompanionAction: (action) =>
+    ipcRenderer.send('companion:action', action),
+
+  companionReady: () =>
+    ipcRenderer.send('companion:renderer-ready'),
 
   // Quick Look shortcut
   triggerQuickLook: () =>
@@ -58,5 +73,17 @@ contextBridge.exposeInMainWorld('genie', {
     const handler = (_, mode) => callback(mode);
     ipcRenderer.on('companion:display-mode-changed', handler);
     return () => ipcRenderer.removeListener('companion:display-mode-changed', handler);
+  },
+
+  onCompanionState: (callback) => {
+    const handler = (_, state) => callback(state);
+    ipcRenderer.on('companion:state', handler);
+    return () => ipcRenderer.removeListener('companion:state', handler);
+  },
+
+  onCompanionModeChanged: (callback) => {
+    const handler = (_, state) => callback(state);
+    ipcRenderer.on('companion:mode-changed', handler);
+    return () => ipcRenderer.removeListener('companion:mode-changed', handler);
   },
 });

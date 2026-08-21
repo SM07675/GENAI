@@ -74,10 +74,11 @@ from .api.music import router as music_api_router
 from .api.mobile import router as mobile_api_router
 from .api.v1_android import router as v1_android_router
 from .services.mdns_server import start_mdns_service, stop_mdns_service
-from .auth import Session, get_session, issue_token, verify_pin
+from .auth import Session, get_session, issue_token, session_by_id, verify_pin
 from .config import get_settings
 from .os import get_kernel
 from .schemas import WSIn
+from .companion.image_input import ImageInputError, prepare_image, vision_capability
 # Importing tools registers them via the @tool decorator side effect.
 from .tools import TOOL_MANIFESTS, TOOL_SCHEMAS  # noqa: F401
 # Conversation Engine (Genie v2) — now uses VoicePipeline
@@ -242,6 +243,53 @@ async def lifespan(app: FastAPI):
     app.state.companion = companion_manager
     log.info("companion_manager_initialized")
 
+    # ── Agent Runtime initialization ──────────────────────────────────────────
+    try:
+        from .runtime.agent_runtime import AgentRuntime
+        from .runtime.schemas import AutonomyLevel
+        from .runtime.model_router import model_router
+        from .core.event_bus import event_bus
+        from .agents import get_all_agents
+        from .api.v2_agent import set_runtime
+
+        agent_runtime = AgentRuntime(
+            model_router=model_router,
+            event_bus=event_bus,
+            kernel=kernel,
+            autonomy_level=AutonomyLevel.BALANCED,
+        )
+
+        # Broadcast agent events to all connected WebSockets in real time
+        async def _broadcast_agent_event(event_type: str, payload: dict[str, Any]) -> None:
+            if hasattr(app.state, "active_websockets") and app.state.active_websockets:
+                msg = json.dumps({"type": "agent_event", "event": event_type, "data": payload})
+                dead = set()
+                for ws in list(app.state.active_websockets):
+                    try:
+                        await ws.send_text(msg)
+                    except Exception:
+                        dead.add(ws)
+                if dead:
+                    app.state.active_websockets.difference_update(dead)
+
+        agent_runtime.set_event_emitter(_broadcast_agent_event)
+
+        # Register all specialized agents
+        for agent in get_all_agents():
+            agent_runtime.register_agent(agent)
+
+        # Make runtime available to API and WebSocket handlers
+        app.state.agent_runtime = agent_runtime
+        set_runtime(agent_runtime)
+
+        log.info(
+            "agent_runtime_initialized",
+            agents=[a.name for a in get_all_agents()],
+        )
+    except Exception as exc:
+        log.warning("agent_runtime_init_failed", error=str(exc))
+        app.state.agent_runtime = None
+
     yield
 
     # Cleanup
@@ -275,6 +323,13 @@ app.include_router(external_api_router, prefix="/api/v1")
 app.include_router(music_api_router, prefix="/api/v1")
 app.include_router(mobile_api_router, prefix="/api/v1")
 app.include_router(v1_android_router)
+
+# Agent Runtime v2 API
+try:
+    from .api.v2_agent import router as v2_agent_router
+    app.include_router(v2_agent_router)
+except ImportError:
+    pass
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
@@ -537,7 +592,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     await emit({"type": "auth_fail"})
                     # Keep socket open so the UI can retry without reconnect.
                     continue
-                session = issue_token()
+                requested_id = (msg_in.session_id or msg_in.conversation_id or "").strip()
+                valid_id = requested_id[:64] if requested_id and all(c.isalnum() or c in "-_" for c in requested_id[:64]) else ""
+                session = session_by_id(valid_id) if valid_id else None
+                if session is None:
+                    session = issue_token(valid_id or None)
+                else:
+                    session.touch()
                 if hasattr(app.state, "active_websockets"):
                     app.state.active_websockets.add(ws)
                 _debug_ws_event(
@@ -554,6 +615,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 url = ngrok_tunnel.get_public_url()
                 if url:
                     await emit({"type": "public_url", "url": url})
+                vision_supported, vision_reason = vision_capability(settings)
+                await emit({
+                    "type": "vision_status",
+                    "supported": vision_supported,
+                    "reason": vision_reason,
+                    "model": settings.companion_vision_model if vision_supported else None,
+                })
                     
                 # Bind session to conversation engine
                 if hasattr(app.state, "engine"):
@@ -571,7 +639,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 continue
 
             # ── Per-session rate limit ────────────────────────────────────────
-            if mtype in ("text", "audio_end"):
+            if mtype in ("text", "image", "audio_end"):
                 allowed, retry_after = _session_allow_request(session.session_id)
                 if not allowed:
                     await emit({
@@ -581,10 +649,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     })
                     continue
 
-            # ── Cancel an in-flight turn ──────────────────────────────────────
-            if mtype == "cancel":
+            # ── Cancel or Kill Switch ─────────────────────────────────────────
+            if mtype in ("cancel", "kill"):
                 if current_task and not current_task.done():
                     current_task.cancel()
+                if hasattr(app.state, "agent_runtime") and app.state.agent_runtime:
+                    await app.state.agent_runtime.stop_all()
                 _debug_ws_event(
                     "B",
                     "main.py:websocket:cancel",
@@ -596,11 +666,38 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 )
                 if hasattr(app.state, "engine"):
                     await app.state.engine.on_cancel()
+                await emit({"type": "stop_audio"})
                 continue
 
             if mtype == "manual_wake":
                 if hasattr(app.state, "engine"):
                     await app.state.engine.on_manual_wake()
+                continue
+
+            # ── Multimodal image turn ─────────────────────────────────────────
+            if mtype == "image":
+                supported, reason = vision_capability(settings)
+                if not supported:
+                    await emit({
+                        "type": "error",
+                        "message": reason or "The selected model does not support image input.",
+                        "code": "vision_not_supported",
+                    })
+                    continue
+                try:
+                    prepared = await asyncio.to_thread(
+                        prepare_image,
+                        msg_in.frame or "",
+                        msg_in.mime or "",
+                    )
+                except ImageInputError as exc:
+                    await emit({"type": "error", "message": str(exc), "code": "invalid_image"})
+                    continue
+
+                prompt = (msg_in.text or "What can you tell me about this image?").strip()
+                filename = (msg_in.filename or "image")[:120]
+                if hasattr(app.state, "engine"):
+                    await app.state.engine.on_image_input(prepared.data, prompt, filename)
                 continue
 
             # ── Text turn ─────────────────────────────────────────────────────
@@ -618,6 +715,32 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 # Use engine for text turns now
                 if hasattr(app.state, "engine"):
                     await app.state.engine.on_text_input(user_text)
+                continue
+
+            # ── Agent Goal (Autonomous Multi-Step Execution) ──────────────────
+            if mtype == "goal":
+                user_text = (msg_in.text or "").strip()
+                if user_text and hasattr(app.state, "agent_runtime") and app.state.agent_runtime:
+                    asyncio.create_task(
+                        app.state.agent_runtime.execute_goal(
+                            user_input=user_text,
+                            session_id=session.session_id,
+                            context_summary="",
+                        )
+                    )
+                continue
+
+            # ── Task Control (Pause / Resume / Cancel) ────────────────────────
+            if mtype == "task_action":
+                action = data.get("action", "")
+                tid = data.get("task_id", "")
+                if tid and hasattr(app.state, "agent_runtime") and app.state.agent_runtime:
+                    if action == "pause":
+                        await app.state.agent_runtime.pause_task(tid)
+                    elif action == "resume":
+                        await app.state.agent_runtime.resume_task(tid)
+                    elif action == "cancel":
+                        await app.state.agent_runtime.cancel_task(tid)
                 continue
 
 

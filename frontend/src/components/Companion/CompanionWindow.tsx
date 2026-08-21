@@ -7,15 +7,13 @@
  * - Browser/Non-Electron mode: renders `CompanionMode` in-app floating portal.
  */
 import { AnimatePresence } from "framer-motion";
-import { useCompanion } from "../../hooks/useCompanion";
+
 import CompanionOrb from "./CompanionOrb";
 import CompanionMode from "./CompanionMode";
 import DesktopCompanionOverlay from "./DesktopCompanionOverlay";
 import { useCompanionStore } from "../../store/companionStore";
 
 export default function CompanionWindow() {
-  // Bind companion hooks & IPC handlers
-  useCompanion();
 
   const mode = useCompanionStore((s) => s.mode);
   const launcherVisible = useCompanionStore((s) => s.launcherVisible);
@@ -30,6 +28,12 @@ export default function CompanionWindow() {
   if (isDedicatedElectronOverlay) {
     return <DesktopCompanionOverlay />;
   }
+
+  // The native Electron build already provides Companion Mode through the
+  // dedicated desktop window (nav rail, Home pill, Ctrl+Shift+G). The
+  // in-page launcher orb below exists only as a fallback for the plain
+  // browser/dev target, where no separate desktop window is possible.
+  if (genie.isElectron) return null;
 
   // Web/Browser fallback mode
   const isCompanionActive = mode !== "off";

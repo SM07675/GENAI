@@ -17,6 +17,7 @@
  */
 import { useEffect, useRef, useCallback } from "react";
 import { useAppStore } from "../store/appStore";
+import { glog } from "../utils/logger";
 
 // #region debug-point C:frontend-voice-pipeline
 const DEBUG_SERVER_URL = "http://127.0.0.1:7777/event";
@@ -92,7 +93,7 @@ export function useVoicePipeline() {
       const vs     = state.voiceState;
       const prevVs = prevState.voiceState;
       if (vs === prevVs) return;
-      console.log(`[GENIE-VOICE] Backend state: ${prevVs} -> ${vs}`);
+      glog(`[GENIE-VOICE] Backend state: ${prevVs} -> ${vs}`);
 
       if (vs === "wake_detected") {
         // Resume audio context before playing activation sound
@@ -104,7 +105,7 @@ export function useVoicePipeline() {
 
       // v12: barge_in — stop audio immediately, NO activation sound
       if (vs === "barge_in") {
-        console.log("[GENIE-VOICE] ⚡ Barge-in detected — stopping audio immediately");
+        glog("[GENIE-VOICE] ⚡ Barge-in detected — stopping audio immediately");
         stopAllAudio();
       }
     });
@@ -136,7 +137,7 @@ export function useVoicePipeline() {
     ].includes(genieState);
 
     if (isCancellable) {
-      console.log("[GENIE-VOICE] ⚡ Manual cancel — stopping audio and resetting UI state instantly");
+      glog("[GENIE-VOICE] ⚡ Manual cancel — stopping audio and resetting UI state instantly");
       // Fast local stop — kill audio playback and state immediately (<1ms)
       stopAllAudio();
       useAppStore.setState({
@@ -149,7 +150,7 @@ export function useVoicePipeline() {
         ws.send(JSON.stringify({ type: "cancel" }));
       }
     } else if (voiceState === "idle" || voiceState === "wake_listening" || genieState === "sleeping" || genieState === "idle") {
-      console.log("[GENIE-VOICE] Manual mic → start active listening");
+      glog("[GENIE-VOICE] Manual mic → start active listening");
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "manual_wake" }));
       }
@@ -166,14 +167,14 @@ export function useVoicePipeline() {
     initDoneRef.current = true;
 
     useAppStore.setState({ genieState: "sleeping" });
-    console.log("[GENIE-VOICE] ✅ Voice pipeline v12 mounted (backend-driven, full-duplex barge-in)");
+    glog("[GENIE-VOICE] ✅ Voice pipeline v12 mounted (backend-driven, full-duplex barge-in)");
     setToggleListening(toggleListening);
 
     return () => {
       mountedRef.current  = false;
       initDoneRef.current = false;
       setToggleListening(null);
-      console.log("[GENIE-VOICE] Voice pipeline unmounted");
+      glog("[GENIE-VOICE] Voice pipeline unmounted");
     };
   }, [setToggleListening, toggleListening]);
 

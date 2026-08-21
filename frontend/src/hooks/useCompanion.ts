@@ -29,16 +29,51 @@ export function useCompanion() {
     [ws]
   );
 
+  // ── Truthful start/stop ─────────────────────────────────────────────────
+  // Do NOT flip the store to "active" optimistically. Go through "starting"
+  // and only land on "active" once the main process confirms the companion
+  // BrowserWindow actually exists and is visible. On failure, fall back to
+  // "off" rather than silently lying to the UI.
   const startCompanion = useCallback(
-    (subMode?: CompanionSubMode) => {
-      sendCompanionCommand("companion_start", subMode ? { mode: subMode } : {});
-      setMode("active", subMode);
+    async (subMode?: CompanionSubMode) => {
+      setMode("starting", subMode);
+
+      const genie = (window as any).genie;
+      if (!genie || !genie.isElectron) {
+        sendCompanionCommand("companion_start", subMode ? { mode: subMode } : {});
+        setMode("active", subMode);
+        return;
+      }
+
+      try {
+        const result = await genie.showCompanion?.();
+        if (result?.success) {
+          setMode("active", subMode);
+        } else {
+          console.error("[Companion] Failed to start:", result?.error);
+          setMode("off");
+        }
+      } catch (err) {
+        console.error("[Companion] Failed to start:", err);
+        setMode("off");
+      }
     },
     [sendCompanionCommand, setMode]
   );
 
-  const stopCompanion = useCallback(() => {
-    sendCompanionCommand("companion_stop");
+  const stopCompanion = useCallback(async () => {
+    setMode("stopping");
+
+    const genie = (window as any).genie;
+    if (genie && genie.isElectron) {
+      try {
+        await genie.hideCompanion?.();
+      } catch (err) {
+        console.error("[Companion] Failed to hide window cleanly:", err);
+      }
+    } else {
+      sendCompanionCommand("companion_stop");
+    }
     setMode("off");
   }, [sendCompanionCommand, setMode]);
 
@@ -71,18 +106,18 @@ export function useCompanion() {
   );
 
   // ── Electron Sync for Overlay Window ──────────────────────────────────────
+  // Note: show/hide is intentionally NOT driven from here — it's called
+  // explicitly (and awaited) from startCompanion()/stopCompanion() above, so
+  // the store only reaches "active" after main.cjs confirms the window is
+  // real and visible. This effect just keeps display mode in sync while
+  // already active; it never claims a status it hasn't verified.
   useEffect(() => {
     const genie = (window as any).genie;
     if (!genie || !genie.isElectron) return;
+    if (mode !== "active") return;
 
-    if (mode !== "off") {
-      genie.showCompanion?.();
-      genie.setCompanionDisplayMode?.(displayMode);
-      genie.setCompanionPosition?.(position.x, position.y);
-    } else {
-      genie.hideCompanion?.();
-    }
-  }, [mode, displayMode, position.x, position.y]);
+    genie.setCompanionDisplayMode?.(displayMode);
+  }, [mode, displayMode]);
 
   // Handle hotkeys & IPC events from Electron main process
   useEffect(() => {
@@ -105,12 +140,24 @@ export function useCompanion() {
       setDisplayMode(newMode);
     });
 
+    const unSubMode = genie.onCompanionModeChanged?.((state: { active: boolean }) => {
+      setMode(state.active ? "active" : "off");
+    });
+
+    const unSubBackendControl = genie.onCompanionBackendControl?.((action: { type: string }) => {
+      if (action?.type === "companion_start" || action?.type === "companion_stop") {
+        sendCompanionCommand(action.type);
+      }
+    });
+
     return () => {
       unSubQuickLook?.();
       unSubToggleMode?.();
       unSubDisplayMode?.();
+      unSubMode?.();
+      unSubBackendControl?.();
     };
-  }, [mode, startCompanion, stopCompanion, requestQuickLook, setDisplayMode]);
+  }, [mode, startCompanion, stopCompanion, requestQuickLook, setDisplayMode, setMode, sendCompanionCommand]);
 
   return {
     startCompanion,

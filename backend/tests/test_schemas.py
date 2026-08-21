@@ -19,6 +19,21 @@ class TestWSIn:
         msg = WSIn(type="text", text="open chrome")
         assert msg.text == "open chrome"
 
+    def test_image_valid(self):
+        msg = WSIn(
+            type="image",
+            text="Explain this",
+            frame="aGVsbG8=",
+            mime="image/png",
+            filename="screen.png",
+        )
+        assert msg.type == "image"
+        assert msg.mime == "image/png"
+
+    def test_conversation_id_valid(self):
+        msg = WSIn(type="hello", pin="1234", conversation_id="conversation-123")
+        assert msg.conversation_id == "conversation-123"
+
     def test_audio_end_valid(self):
         msg = WSIn(type="audio_end")
         assert msg.type == "audio_end"

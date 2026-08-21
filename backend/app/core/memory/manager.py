@@ -253,6 +253,30 @@ class MemoryManager:
             await self.initialize()
         return await self._db.get_recent(limit=limit)
 
+    async def forget(self, query: str) -> int:
+        """Forget memories matching the query (e.g., when user says 'forget that')."""
+        if not self._initialized:
+            await self.initialize()
+        return await self._db.delete_matching(query)
+
+    async def delete_memory(self, mem_id: str) -> bool:
+        """Delete a specific memory by ID."""
+        if not self._initialized:
+            await self.initialize()
+        return await self._db.delete_memory(mem_id)
+
+    async def update_memory(self, mem_id: str, content: str, importance: Optional[float] = None) -> bool:
+        """Update a specific memory."""
+        if not self._initialized:
+            await self.initialize()
+        return await self._db.update_memory(mem_id, content, importance)
+
+    async def clear_all_memories(self) -> int:
+        """Clear all stored memories and preferences."""
+        if not self._initialized:
+            await self.initialize()
+        return await self._db.clear_all()
+
     async def clear_session_memory(self, session_id: str) -> None:
         """Clear temporary memories from a completed session."""
         # Expiry is handled automatically by delete_expired()

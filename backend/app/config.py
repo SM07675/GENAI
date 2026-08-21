@@ -82,11 +82,11 @@ class Settings(BaseSettings):
     # --- Nvidia (OpenAI-compatible endpoint) -----------------------------
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_model: str = "google/gemma-4-31b-it"
-    nvidia_temperature: float = 1.0
-    nvidia_max_tokens: int = 16384
-    nvidia_timeout_seconds: float = 60.0
-    nvidia_enable_thinking: bool = False   # False = instant fast voice response, True = deep reasoning
+    nvidia_model: str = "meta/llama-3.1-8b-instruct"
+    nvidia_temperature: float = 0.7
+    nvidia_max_tokens: int = 4096
+    nvidia_timeout_seconds: float = 30.0
+    nvidia_enable_thinking: bool = False
 
     # --- Offline LLM fallback --------------------------------------------
     local_llm_enabled: bool = True
@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     tts_use_fp16: bool = True              # enable FP16 if model supports it
 
     # --- Ngrok / mobile tunnel -------------------------------------------
-    ngrok_enabled: bool = True
+    ngrok_enabled: bool = False
     ngrok_authtoken: str = ""              # recommended for stable tunnels
     ngrok_region: str = ""                 # "" = auto; e.g. "us", "eu", "ap"
 
@@ -197,9 +197,9 @@ class Settings(BaseSettings):
     companion_max_vision_calls_per_minute: int = 20
     companion_observation_interval: int = 3
     companion_vision_enabled: bool = True
-    # Vision provider: "nvidia" (default: Nemotron 12B v2 VL), "gemini", "openai", "local" (future)
+    # Vision provider: "nvidia" (default: google/gemma-4-31b-it), "gemini", "openai", "local" (future)
     companion_vision_provider: str = "nvidia"
-    companion_vision_model: str = "nvidia/nemotron-nano-12b-v2-vl"
+    companion_vision_model: str = "google/gemma-4-31b-it"
     companion_vision_api_key: str = ""
     companion_vision_confidence_threshold: float = 0.65
     # Default personality preset: friendly | hype | funny | coach | quiet | default

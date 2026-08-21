@@ -10,6 +10,7 @@ import { useFrame } from '@react-three/fiber';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, VRMHumanBoneName } from '@pixiv/three-vrm';
 import { useAppStore } from '../../store/appStore';
+import { glog } from '../../utils/logger';
 
 const DEG2RAD = Math.PI / 180;
 
@@ -80,7 +81,7 @@ export function VRMAvatar({
   useEffect(() => {
     let isMounted = true;
     const modelUrl = resolveModelUrl();
-    console.log('[VRMAvatar] Loading from:', modelUrl);
+    glog('[VRMAvatar] Loading from:', modelUrl);
 
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
@@ -89,7 +90,7 @@ export function VRMAvatar({
       modelUrl,
       (gltf) => {
         if (!isMounted) return;
-        console.log('[VRMAvatar] GLTF loaded, userData:', Object.keys(gltf.userData));
+        glog('[VRMAvatar] GLTF loaded, userData:', Object.keys(gltf.userData));
 
         const loadedVrm = gltf.userData.vrm;
         if (!loadedVrm) {
@@ -99,12 +100,12 @@ export function VRMAvatar({
           return;
         }
 
-        console.log('[VRMAvatar] VRM version:', loadedVrm.meta?.metaVersion ?? 'unknown');
+        glog('[VRMAvatar] VRM version:', loadedVrm.meta?.metaVersion ?? 'unknown');
 
         // Correct VRM 0.x facing direction (VRM 0.x faces +Z, we need -Z)
         try {
           VRMUtils.rotateVRM0(loadedVrm);
-          console.log('[VRMAvatar] rotateVRM0 applied');
+          glog('[VRMAvatar] rotateVRM0 applied');
         } catch (e) {
           console.warn('[VRMAvatar] rotateVRM0 not needed or failed:', e.message);
         }
@@ -122,17 +123,17 @@ export function VRMAvatar({
         const box = new THREE.Box3().setFromObject(gltf.scene);
         const offsetY = -box.min.y;
         gltf.scene.position.y += offsetY;
-        console.log('[VRMAvatar] Bounding box:', box.min.y.toFixed(3), '->', box.max.y.toFixed(3), '| offset:', offsetY.toFixed(3));
+        glog('[VRMAvatar] Bounding box:', box.min.y.toFixed(3), '->', box.max.y.toFixed(3), '| offset:', offsetY.toFixed(3));
 
         vrmRef.current = loadedVrm;
         setVrm(loadedVrm);
         setLoadError(null);
-        console.log('[VRMAvatar] ✅ Ready!');
+        glog('[VRMAvatar] ✅ Ready!');
       },
       (progress) => {
         if (progress.total > 0) {
           const pct = Math.round((progress.loaded / progress.total) * 100);
-          console.log(`[VRMAvatar] Loading ${pct}%`);
+          glog(`[VRMAvatar] Loading ${pct}%`);
         }
       },
       (error) => {

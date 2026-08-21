@@ -35,12 +35,22 @@ def _load_vosk_model():
 
     try:
         import os
+        import sys
         from vosk import Model
-        local_path = os.path.abspath("vosk-model-small-en-us-0.15")
-        if os.path.exists(local_path):
+
+        model_dir = "vosk-model-small-en-us-0.15"
+        bundle_root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+        candidates = [
+            os.path.join(bundle_root, model_dir),
+            os.path.abspath(model_dir),
+        ]
+        local_path = next((path for path in candidates if os.path.isdir(path)), None)
+        if local_path:
             _vosk_model_cache = Model(model_path=local_path)
         else:
-            _vosk_model_cache = Model(model_name="vosk-model-small-en-us-0.15")
+            # Development fallback may use Vosk's model cache/downloader. The
+            # production build bundles the model and does not rely on this.
+            _vosk_model_cache = Model(model_name=model_dir)
         _vosk_model_loaded = True
         log.info("vosk_model_loaded")
         return _vosk_model_cache

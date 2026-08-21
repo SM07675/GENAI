@@ -1,430 +1,278 @@
-/**
- * DesktopCompanionOverlay.tsx — Standalone Floating Desktop Companion Overlay.
- *
- * Designed for the dedicated Electron overlay BrowserWindow.
- *
- * Features:
- * - 100% Transparent background (no rectangular container card by default)
- * - Minimal, high-aesthetic animated 2D avatar presence
- * - Non-intrusive focus management (never steals focus while user types in Chrome/VS Code)
- * - Dynamic Click-Through support (passes mouse events through transparent background)
- * - Draggable with position persistence & multi-monitor boundary safety
- * - Hover controls bar (🎤 Mic, 📷 Camera, 👁 Quick Look, ⚙ Open App, × Hide)
- * - Click to expand floating interactive card
- * - Right-click desktop context menu
- */
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useAppStore } from '../../store/appStore';
 import { useCompanionStore } from '../../store/companionStore';
-import { useCompanion } from '../../hooks/useCompanion';
-import { useWebSocket } from '../../hooks/useWebSocket';
-import { useAudioPlayer } from '../../hooks/useAudioPlayer';
-import GenieFace from '../GenieFace/GenieFace';
-import PrivacyPanel from './PrivacyPanel';
-import VoiceWaveform from './VoiceWaveform';
-import ContextStatusBar from './ContextStatusBar';
-import CameraCompanion from './CameraCompanion';
-import ToolFeedback from './ToolFeedback';
+import { GenieCoreOrb } from '../GenieCoreOrb';
+import { SendIcon, CameraIcon } from '../UI/Icons';
+
+type CompanionBridge = {
+  isElectron?: boolean;
+  sendCompanionAction?: (action: Record<string, unknown>) => void;
+  exitCompanion?: () => Promise<unknown>;
+  focusMain?: () => void;
+  setExpanded?: (expanded: boolean) => void;
+  setAlwaysOnTop?: (enabled: boolean) => void;
+  companionReady?: () => void;
+  onCompanionState?: (callback: (state: any) => void) => (() => void) | undefined;
+};
+
+function getBridge(): CompanionBridge {
+  return ((window as any).genie || {}) as CompanionBridge;
+}
+
+const STATE_LABELS: Record<string, { label: string; color: string }> = {
+  offline: { label: 'Offline', color: 'text-zinc-500' },
+  idle: { label: 'Ready', color: 'text-cyan-300' },
+  sleeping: { label: 'Standby ("Hey Genie")', color: 'text-zinc-400' },
+  listening: { label: 'Listening Mode', color: 'text-cyan-300 font-bold' },
+  follow_up_listening: { label: 'Listening Mode', color: 'text-cyan-300 font-bold' },
+  waking: { label: 'Waking up…', color: 'text-purple-300 font-bold' },
+  transcribing: { label: 'Processing Voice…', color: 'text-amber-300 font-bold' },
+  thinking: { label: 'Thinking Mode', color: 'text-purple-300 font-bold' },
+  searching: { label: 'Search Mode', color: 'text-sky-300 font-bold' },
+  planning: { label: 'Planning Mode', color: 'text-indigo-300 font-bold' },
+  executing: { label: 'Execution Mode', color: 'text-emerald-300 font-bold' },
+  speaking: { label: 'Speaking Mode', color: 'text-cyan-300 font-bold' },
+  error: { label: 'Attention Needed', color: 'text-rose-300 font-bold' },
+};
 
 export default function DesktopCompanionOverlay() {
-  const genieState = useAppStore((s) => s.genieState);
-  const liveTranscript = useAppStore((s) => s.liveTranscript);
-  const wsStatus = useAppStore((s) => s.wsStatus);
-  const companion = useCompanionStore();
-  const { startCompanion, stopCompanion, pauseCompanion, resumeCompanion, requestQuickLook } = useCompanion();
+  const messages = useAppStore((state) => state.messages);
+  const genieState = useAppStore((state) => state.genieState);
+  const liveTranscript = useAppStore((state) => state.liveTranscript);
+  const wsStatus = useAppStore((state) => state.wsStatus);
+  const amplitude = useAppStore((state) => state.amplitude);
+  const visionSupported = useAppStore((state) => state.visionSupported);
 
-  // Local state for standalone companion overlay
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [showHoverControls, setShowHoverControls] = useState(false);
-  const [showContextMenu, setShowContextMenu] = useState(false);
-  const [showCamera, setShowCamera] = useState(false);
-  const [positionMode, setPositionMode] = useState<'free' | 'top-right' | 'bottom-right' | 'top-left' | 'bottom-left'>('free');
+  const [expanded, setExpanded] = useState(false);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(true);
+  const [text, setText] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const hoverTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const connected = wsStatus === 'authed' || wsStatus === 'connected';
+  const isListening = ['listening', 'waking', 'follow_up_listening'].includes(genieState);
+  const isBusy = ['thinking', 'executing', 'transcribing', 'speaking'].includes(genieState);
+  const statusInfo = !connected ? { label: 'Connecting…', color: 'text-amber-400' } : (STATE_LABELS[genieState] || STATE_LABELS.idle);
 
-  // Audio player & WebSocket for standalone overlay mode
-  const { queueAudioChunk, stopAudio, notifyTtsDone } = useAudioPlayer(audioRef);
-  const { sendText } = useWebSocket('1234', queueAudioChunk, stopAudio, notifyTtsDone);
-
-  const isConnected = wsStatus === 'authed' || wsStatus === 'connected';
-
-  // ── Set body class to transparent overlay ────────────────────────────────
   useEffect(() => {
     document.body.classList.add('companion-overlay-mode');
+    const bridge = getBridge();
+    const unsubscribe = bridge.onCompanionState?.((snapshot) => {
+      if (snapshot?.app) useAppStore.setState(snapshot.app);
+      if (snapshot?.companion) useCompanionStore.setState(snapshot.companion);
+    });
+    bridge.companionReady?.();
     return () => {
+      unsubscribe?.();
       document.body.classList.remove('companion-overlay-mode');
     };
   }, []);
 
-  // ── Mouse hover & click-through IPC handling ─────────────────────────────
-  const handleMouseEnter = useCallback(() => {
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    setShowHoverControls(true);
-
-    const genie = (window as any).genie;
-    if (genie && genie.isElectron) {
-      genie.setCompanionInteractive?.(true);
-      genie.setCompanionClickThrough?.(false);
+  useEffect(() => {
+    getBridge().setExpanded?.(expanded);
+    if (expanded) {
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     }
-  }, []);
+  }, [expanded, messages]);
 
-  const handleMouseLeave = useCallback(() => {
-    hoverTimerRef.current = setTimeout(() => {
-      setShowHoverControls(false);
-      setShowContextMenu(false);
+  const send = useCallback(() => {
+    const prompt = text.trim();
+    if (!prompt) return;
+    const bridge = getBridge();
+    bridge.sendCompanionAction?.({ type: 'text', text: prompt });
+    setText('');
+  }, [text]);
 
-      const genie = (window as any).genie;
-      if (genie && genie.isElectron && !isExpanded) {
-        genie.setCompanionClickThrough?.(true);
-      }
-    }, 1200);
-  }, [isExpanded]);
+  const toggleVoice = useCallback(() => {
+    getBridge().sendCompanionAction?.({ type: isBusy || isListening ? 'cancel' : 'manual_wake' });
+  }, [isBusy, isListening]);
 
-  // ── Positioning Mode preset applier ──────────────────────────────────────
-  const applyPositionPreset = useCallback((preset: 'free' | 'top-right' | 'bottom-right' | 'top-left' | 'bottom-left') => {
-    setPositionMode(preset);
-    if (preset === 'free') return;
+  const openMain = useCallback(() => getBridge().focusMain?.(), []);
+  const closeCompanion = useCallback(() => { void getBridge().exitCompanion?.(); }, []);
 
-    const screenW = window.screen.availWidth || window.innerWidth;
-    const screenH = window.screen.availHeight || window.innerHeight;
-
-    let targetX = 20;
-    let targetY = 20;
-
-    switch (preset) {
-      case 'top-right':
-        targetX = screenW - 160;
-        targetY = 40;
-        break;
-      case 'bottom-right':
-        targetX = screenW - 160;
-        targetY = screenH - 220;
-        break;
-      case 'top-left':
-        targetX = 40;
-        targetY = 40;
-        break;
-      case 'bottom-left':
-        targetX = 40;
-        targetY = screenH - 220;
-        break;
-    }
-
-    companion.setPosition({ x: targetX, y: targetY });
-    const genie = (window as any).genie;
-    if (genie && genie.isElectron) {
-      genie.setCompanionPosition?.(targetX, targetY);
-    }
-  }, [companion]);
-
-  // ── Handle focus main app ────────────────────────────────────────────────
-  const handleOpenMainApp = useCallback(() => {
-    const genie = (window as any).genie;
-    if (genie && genie.isElectron) {
-      genie.focusMain?.();
-    }
-  }, []);
+  const recentMessages = useMemo(() => messages.slice(-10), [messages]);
 
   return (
-    <div
-      className="relative w-screen h-screen overflow-hidden select-none pointer-events-none"
-      style={{ background: 'transparent' }}
-    >
-      {/* Hidden audio element for TTS playback */}
-      <audio ref={audioRef} style={{ display: 'none' }} />
-
-      {/* Main Floating Presence Avatar Container */}
-      <div
-        className="pointer-events-auto absolute"
-        style={{
-          left: companion.position.x,
-          top: companion.position.y,
-          zIndex: 9999,
-        }}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          setShowContextMenu((v) => !v);
-        }}
+    <main className="w-full h-full p-2 select-none flex flex-col justify-start">
+      {/* ── Movable Floating Glass Container ── */}
+      <section
+        className={`w-full rounded-3xl border border-white/15 bg-zinc-950/90 backdrop-blur-3xl shadow-[0_25px_60px_rgba(0,0,0,0.8),0_0_35px_rgba(6,182,212,0.15)] overflow-hidden transition-all duration-300 flex flex-col ${
+          expanded ? 'h-[500px]' : 'h-auto'
+        }`}
       >
-        {/* Proactive / Live Transcript Callout Bubble */}
-        <AnimatePresence>
-          {liveTranscript && (
-            <motion.div
-              initial={{ opacity: 0, y: 8, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.9 }}
-              style={{
-                position: 'absolute',
-                bottom: '105%',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                marginBottom: 8,
-                background: 'rgba(8,12,28,0.95)',
-                border: '1px solid rgba(94,234,212,0.4)',
-                borderRadius: 16,
-                padding: '8px 14px',
-                color: '#e2e8f0',
-                fontSize: 12,
-                fontFamily: "'Inter', sans-serif",
-                maxWidth: 240,
-                textAlign: 'center',
-                backdropFilter: 'blur(16px)',
-                boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-              }}
-            >
-              {liveTranscript}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Hover Action Controls Bar (🎤 📷 👁 ⚙ ×) */}
-        <AnimatePresence>
-          {showHoverControls && !isExpanded && (
-            <motion.div
-              initial={{ opacity: 0, y: 6, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 6, scale: 0.9 }}
-              transition={{ duration: 0.15 }}
-              style={{
-                position: 'absolute',
-                bottom: -36,
-                left: '50%',
-                transform: 'translateX(-50%)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '4px 8px',
-                borderRadius: 99,
-                background: 'rgba(6,10,24,0.92)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                backdropFilter: 'blur(16px)',
-                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-              }}
-            >
-              <ControlButton title="Quick Look (Ctrl+Shift+G)" onClick={() => requestQuickLook()}>
-                👁
-              </ControlButton>
-              <ControlButton title="Camera Vision" onClick={() => setShowCamera((v) => !v)}>
-                📷
-              </ControlButton>
-              <ControlButton title="Open Main App" onClick={handleOpenMainApp}>
-                ⚙
-              </ControlButton>
-              <ControlButton title="Hide Companion" onClick={stopCompanion} danger>
-                ×
-              </ControlButton>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Floating Avatar Core (Minimal Desktop Presence) */}
-        <motion.div
-          style={{
-            cursor: 'pointer',
-            filter: isConnected ? 'drop-shadow(0 0 16px rgba(94,234,212,0.35))' : 'drop-shadow(0 0 16px rgba(245,158,11,0.35))',
-          }}
-          whileHover={{ scale: 1.06 }}
-          whileTap={{ scale: 0.94 }}
-          onClick={() => setIsExpanded((v) => !v)}
+        {/* ── 1. Movable Window Titlebar (Drag Region) ── */}
+        <header
+          className="px-4 py-3 border-b border-white/10 bg-white/[0.03] flex items-center justify-between cursor-move"
+          style={{ WebkitAppRegion: 'drag' } as any}
         >
-          <GenieFace size={isExpanded ? 130 : 95} showBody={false} minimal={!isExpanded} />
-        </motion.div>
-
-        {/* Minimal Presence Label */}
-        {!isExpanded && (
-          <div style={{
-            textAlign: 'center',
-            marginTop: 2,
-            color: '#5EEAD4',
-            fontSize: 10,
-            fontWeight: 700,
-            fontFamily: "'Inter', sans-serif",
-            letterSpacing: '0.06em',
-            textShadow: '0 2px 8px rgba(0,0,0,0.8)',
-          }}>
-            Genie
+          <div className="flex items-center gap-2.5">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                connected ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-amber-400 animate-pulse'
+              }`}
+            />
+            <span className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-200">
+              Genie Overlay
+            </span>
+            <span className="text-zinc-600 text-xs">•</span>
+            <span className={`text-[11px] font-mono ${statusInfo.color}`}>{statusInfo.label}</span>
           </div>
-        )}
 
-        {/* Expanded Desktop Card */}
-        <AnimatePresence>
-          {isExpanded && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9, y: 10 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 10 }}
-              style={{
-                position: 'absolute',
-                top: '110%',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                width: 300,
-                background: 'rgba(5,8,20,0.96)',
-                border: '1.5px solid rgba(94,234,212,0.4)',
-                borderRadius: 24,
-                padding: 16,
-                backdropFilter: 'blur(24px)',
-                boxShadow: '0 24px 64px rgba(0,0,0,0.7), 0 0 40px rgba(94,234,212,0.15)',
-                fontFamily: "'Inter', sans-serif",
+          {/* Action Window Controls (No-Drag) */}
+          <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
+            <button
+              type="button"
+              onClick={() => {
+                const next = !alwaysOnTop;
+                setAlwaysOnTop(next);
+                getBridge().setAlwaysOnTop?.(next);
               }}
+              className={`p-1.5 rounded-lg text-xs transition-all ${
+                alwaysOnTop ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+              title="Toggle Always on Top"
             >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#5EEAD4', boxShadow: '0 0 8px #5EEAD4' }} />
-                  <span style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 700 }}>
-                    Genie AI Companion
-                  </span>
-                </div>
+              📌
+            </button>
+            <button
+              type="button"
+              onClick={openMain}
+              className="p-1.5 rounded-lg text-xs text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
+              title="Open Full Genie App"
+            >
+              ↗
+            </button>
+            <button
+              type="button"
+              onClick={closeCompanion}
+              className="p-1.5 rounded-lg text-xs text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 transition-all"
+              title="Close Companion"
+            >
+              ✕
+            </button>
+          </div>
+        </header>
+
+        {/* ── 2. Hero Interactive Presence (Movable Body) ── */}
+        <div className="p-4 flex items-center gap-4 bg-gradient-to-b from-white/[0.02] to-transparent">
+          {/* Mini Glowing Genie Core Orb */}
+          <div
+            onClick={() => setExpanded(!expanded)}
+            className="cursor-pointer hover:scale-105 transition-transform shrink-0"
+            title="Click to expand conversation"
+          >
+            <GenieCoreOrb state={genieState} size={76} />
+          </div>
+
+          {/* Dynamic Status / Speech Transcript */}
+          <div className="flex-1 min-w-0 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-zinc-200">Personal Assistant</span>
+              <button
+                type="button"
+                onClick={() => setExpanded(!expanded)}
+                className="text-[11px] font-mono text-cyan-400 hover:text-cyan-300 transition"
+              >
+                {expanded ? '▲ Collapse' : '▼ Chat'}
+              </button>
+            </div>
+            <p className="text-xs text-zinc-400 leading-relaxed truncate">
+              {liveTranscript ? `"${liveTranscript}"` : 'Ask naturally by voice or type...'}
+            </p>
+          </div>
+        </div>
+
+        {/* ── 3. Quick Action Button Bar ── */}
+        <div className="px-4 pb-3 flex items-center justify-between gap-2 border-b border-white/5">
+          {/* Voice Talk Button */}
+          <button
+            type="button"
+            onClick={toggleVoice}
+            disabled={!connected}
+            className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all shadow-md ${
+              isListening
+                ? 'bg-gradient-to-r from-cyan-400 to-blue-500 text-white shadow-[0_0_20px_rgba(34,211,238,0.5)] animate-pulse'
+                : isBusy
+                ? 'bg-gradient-to-r from-rose-500 to-red-600 text-white'
+                : 'bg-gradient-to-r from-indigo-500 via-purple-500 to-cyan-500 text-white hover:opacity-95'
+            }`}
+          >
+            <span>{isListening ? '🎙 Listening…' : isBusy ? '⏹ Stop' : '🎙 Tap to Talk'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setExpanded(!expanded)}
+            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 text-xs font-mono transition-all"
+            title="Toggle Message Feed"
+          >
+            💬
+          </button>
+        </div>
+
+        {/* ── 4. Expandable Dialogue & Composer Drawer ── */}
+        <AnimatePresence>
+          {expanded && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="flex-1 flex flex-col min-h-0 bg-black/40 overflow-hidden"
+            >
+              {/* Message Feed */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-2.5 custom-scrollbar text-xs">
+                {recentMessages.length === 0 ? (
+                  <p className="text-center py-6 text-zinc-500 text-xs">
+                    No recent dialogue turns.
+                  </p>
+                ) : (
+                  recentMessages.map((m: any, i: number) => (
+                    <div
+                      key={m.id || i}
+                      className={`p-2.5 rounded-xl leading-relaxed border ${
+                        m.role === 'user'
+                          ? 'bg-indigo-950/40 border-indigo-500/20 text-indigo-100 ml-4'
+                          : 'bg-zinc-900/70 border-white/10 text-zinc-200 mr-4'
+                      }`}
+                    >
+                      <div className="text-[10px] font-mono text-zinc-400 font-semibold mb-0.5">
+                        {m.role === 'user' ? 'You' : 'Genie'}
+                      </div>
+                      <p className="whitespace-pre-wrap break-words">{m.text}</p>
+                    </div>
+                  ))
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Text Composer */}
+              <div className="p-3 border-t border-white/10 bg-zinc-950/80 flex items-center gap-2">
+                <input
+                  type="text"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      send();
+                    }
+                  }}
+                  placeholder="Type a message or command…"
+                  className="flex-1 bg-transparent text-xs text-white placeholder-zinc-500 outline-none px-2 font-medium"
+                />
                 <button
-                  onClick={() => setIsExpanded(false)}
-                  style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 14 }}
+                  type="button"
+                  onClick={send}
+                  disabled={!text.trim()}
+                  className="p-2 rounded-xl bg-cyan-500 text-black font-semibold hover:bg-cyan-400 disabled:opacity-30 transition-all"
                 >
-                  ✕
+                  <SendIcon size={12} />
                 </button>
               </div>
-
-              {/* Privacy Panel */}
-              <PrivacyPanel screenAware={companion.screenAware} micActive={companion.micActive} cameraActive={companion.cameraActive} stateColor="#5EEAD4" />
-
-              {/* Waveform */}
-              <div style={{ display: 'flex', justifyContent: 'center', margin: '10px 0' }}>
-                <VoiceWaveform isActive={genieState === 'speaking' || genieState === 'listening'} color="#5EEAD4" width={180} height={32} />
-              </div>
-
-              {/* Action Buttons */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
-                <ActionButton icon="👁" label="Quick Look" onClick={() => requestQuickLook()} />
-                <ActionButton icon="📷" label="Camera" onClick={() => setShowCamera(true)} />
-                <ActionButton icon="⚙" label="Main App" onClick={handleOpenMainApp} />
-                <ActionButton icon="⏸" label={companion.mode === 'paused' ? 'Resume' : 'Pause'} onClick={companion.mode === 'paused' ? resumeCompanion : pauseCompanion} />
-              </div>
             </motion.div>
           )}
         </AnimatePresence>
-
-        {/* Custom Context Menu */}
-        <AnimatePresence>
-          {showContextMenu && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: '105%',
-                background: 'rgba(8,12,28,0.98)',
-                border: '1px solid rgba(99,102,241,0.3)',
-                borderRadius: 16,
-                padding: '6px 0',
-                minWidth: 170,
-                backdropFilter: 'blur(20px)',
-                boxShadow: '0 16px 40px rgba(0,0,0,0.6)',
-                zIndex: 10000,
-                fontFamily: "'Inter', sans-serif",
-              }}
-            >
-              <ContextMenuItem icon="👁" label="Quick Look (Ctrl+Shift+G)" onClick={() => { requestQuickLook(); setShowContextMenu(false); }} />
-              <ContextMenuItem icon="📌" label="Position: Top-Right" onClick={() => { applyPositionPreset('top-right'); setShowContextMenu(false); }} />
-              <ContextMenuItem icon="📌" label="Position: Bottom-Right" onClick={() => { applyPositionPreset('bottom-right'); setShowContextMenu(false); }} />
-              <ContextMenuItem icon="📌" label="Position: Free Drag" onClick={() => { applyPositionPreset('free'); setShowContextMenu(false); }} />
-              <ContextMenuItem icon="⚙" label="Open Main App" onClick={() => { handleOpenMainApp(); setShowContextMenu(false); }} />
-              <ContextMenuItem icon="✕" label="Exit Companion" onClick={() => { stopCompanion(); setShowContextMenu(false); }} danger />
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* Tool Execution Feedback Overlay */}
-      <ToolFeedback />
-
-      {/* Camera Vision Modal */}
-      <CameraCompanion isOpen={showCamera} onClose={() => setShowCamera(false)} />
-    </div>
-  );
-}
-
-function ControlButton({ title, onClick, children, danger = false }: { title: string; onClick: () => void; children: React.ReactNode; danger?: boolean }) {
-  return (
-    <motion.button
-      whileHover={{ scale: 1.15 }}
-      whileTap={{ scale: 0.9 }}
-      onClick={(e) => { e.stopPropagation(); onClick(); }}
-      title={title}
-      style={{
-        width: 24,
-        height: 24,
-        borderRadius: '50%',
-        background: danger ? 'rgba(248,113,113,0.2)' : 'rgba(255,255,255,0.08)',
-        border: danger ? '1px solid rgba(248,113,113,0.4)' : '1px solid rgba(255,255,255,0.12)',
-        color: danger ? '#f87171' : '#e2e8f0',
-        fontSize: 11,
-        cursor: 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
-    >
-      {children}
-    </motion.button>
-  );
-}
-
-function ActionButton({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: '8px 10px',
-        borderRadius: 12,
-        background: 'rgba(255,255,255,0.04)',
-        border: '1px solid rgba(255,255,255,0.08)',
-        color: '#e2e8f0',
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: 'pointer',
-        transition: 'background 0.15s',
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.04)')}
-    >
-      <span>{icon}</span>
-      <span>{label}</span>
-    </button>
-  );
-}
-
-function ContextMenuItem({ icon, label, onClick, danger = false }: { icon: string; label: string; onClick: () => void; danger?: boolean }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        width: '100%',
-        padding: '8px 14px',
-        background: 'transparent',
-        border: 'none',
-        color: danger ? '#f87171' : '#cbd5e1',
-        fontSize: 11,
-        fontWeight: 500,
-        textAlign: 'left',
-        cursor: 'pointer',
-        transition: 'background 0.15s',
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = danger ? 'rgba(248,113,113,0.1)' : 'rgba(255,255,255,0.06)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-    >
-      <span>{icon}</span>
-      <span>{label}</span>
-    </button>
+      </section>
+    </main>
   );
 }

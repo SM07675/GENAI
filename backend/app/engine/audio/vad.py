@@ -73,11 +73,11 @@ class VADWorker:
         self,
         sample_rate: int = 16000,
         chunk_size: int = 512,
-        vad_threshold: float = 0.4,
+        vad_threshold: float = 0.35,
         echo_threshold_multiplier: float = 1.0,
-        silence_timeout: float = 0.9,
-        initial_silence_timeout: float = 5.0,
-        minimum_speech_duration: float = 0.3,
+        silence_timeout: float = 1.1,
+        initial_silence_timeout: float = 7.0,
+        minimum_speech_duration: float = 0.25,
         maximum_speech_duration: float = 45.0,
         echo_canceller = None,
     ):
@@ -269,7 +269,7 @@ class VADWorker:
                     conf = max_conf
 
                 multiplier = self._echo_canceller.get_vad_threshold_multiplier() if self._echo_canceller else self._echo_multiplier
-                threshold = self.vad_threshold * multiplier
+                threshold = min(0.70, max(0.25, self.vad_threshold * multiplier))
                 return conf > threshold
 
             except Exception as e:

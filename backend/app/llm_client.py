@@ -205,6 +205,10 @@ def get_client(settings: Settings | None = None) -> AsyncOpenAI:
     return client
 
 
+# Alias for backward compatibility with model_router and other callers
+get_or_create_client = get_client
+
+
 def _circuit_breaker(provider: ProviderConfig):
     return get_circuit_breaker(
         name=provider.id,
@@ -353,6 +357,7 @@ async def stream_chat(
             "messages": messages,
             "temperature": provider.temperature,
             "max_tokens": provider.max_tokens,
+            "timeout": provider.timeout_seconds,
             "stream": True,
         }
         if provider.id == "nvidia":

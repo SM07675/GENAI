@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -75,8 +76,9 @@ class VoicePipeline:
         # State machine — single instance, never recreated
         self._sm = ConversationStateMachine()
 
-        # Session / emit
-        self._session: Optional[Session] = None
+        # Session / emit — default to a local session so voice turns on local mic are NEVER dropped
+        from ..auth import issue_token
+        self._session: Optional[Session] = issue_token("local_voice_session")
         self._emit: Emitter = _noop_emit
 
         # Workers
@@ -250,7 +252,8 @@ class VoicePipeline:
     async def on_text_input(self, text: str) -> None:
         """Handle typed text input from the WebSocket."""
         if not self._session:
-            return
+            from ..auth import issue_token
+            self._session = issue_token("local_voice_session")
 
         # Cancel any current turn
         await self._cancel_current_turn("text_input_override")
@@ -260,6 +263,62 @@ class VoicePipeline:
         self._current_turn_task = asyncio.create_task(
             self._process_turn(text, source="text")
         )
+
+    async def on_image_input(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        filename: str = "image",
+    ) -> None:
+        """Analyze a real user image, then continue through the shared turn.
+
+        Vision runs once against the actual bytes. Its grounded result is added
+        to the same session turn so later text/voice follow-ups retain context.
+        """
+        if not self._session:
+            from ..auth import issue_token
+            self._session = issue_token("local_voice_session")
+        await self._cancel_current_turn("image_input_override")
+        self._cancel_follow_up_timer()
+        self._current_turn_task = asyncio.create_task(
+            self._process_image_turn(image_bytes, prompt, filename),
+            name="genie_image_turn",
+        )
+
+    async def _process_image_turn(self, image_bytes: bytes, prompt: str, filename: str) -> None:
+        from ..companion.vision import VisionService
+
+        await self._emit({"type": "orb_state", "state": "thinking"})
+        await self._emit({"type": "engine_state", "state": "thinking"})
+        try:
+            visual_answer = await VisionService(self._settings).answer_image(
+                image_bytes=image_bytes,
+                user_question=prompt,
+                mode="general",
+                app_info={"process_name_stem": filename},
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("user_image_analysis_failed", error=str(exc))
+            await self._emit({
+                "type": "error",
+                "message": "I couldn't analyze that image. Check the vision model and API key, then try again.",
+                "code": "vision_unavailable",
+            })
+            await self._sm.force_transition(EngineState.WAIT_WAKE, "vision_error")
+            await self._emit({"type": "orb_state", "state": "idle"})
+            await self._emit({"type": "engine_state", "state": "wait_wake"})
+            return
+
+        grounded_turn = (
+            f"The user attached an image named {filename!r} and asked: {prompt}\n"
+            "A vision-capable model inspected the actual image and returned this grounded observation:\n"
+            f"{visual_answer}\n\n"
+            "Answer the user naturally and concisely using that observation. Do not claim any "
+            "visual detail beyond it. Preserve the image topic for follow-up questions."
+        )
+        await self._process_turn(grounded_turn, source="image")
 
     async def on_manual_wake(self) -> None:
         """Handle manual wake (mic button press)."""
@@ -274,9 +333,7 @@ class VoicePipeline:
         await self._cancel_current_turn("user_cancel")
         self._cancel_follow_up_timer()
         if self._playback:
-            res = self._playback.interrupt()
-            if asyncio.iscoroutine(res):
-                await res
+            self._playback.interrupt()
 
         await self._emit({"type": "stop_audio"})
         await self._emit({"type": "interrupt"})
@@ -476,6 +533,7 @@ class VoicePipeline:
     async def _begin_listening(self, reason: str) -> None:
         """Transition to LISTENING state."""
         self._cancel_follow_up_timer()
+        self._echo.disable()
 
         ok = await self._sm.transition(EngineState.LISTENING, reason)
         if not ok:
@@ -539,9 +597,9 @@ class VoicePipeline:
         processed while this runs.
         """
         if not self._session:
-            log.warning("process_turn_no_session")
-            await self._sm.transition(EngineState.WAIT_WAKE, "no_session")
-            return
+            from ..auth import issue_token
+            self._session = issue_token("local_voice_session")
+            log.info("process_turn_auto_healed_session", session_id=self._session.session_id)
 
         if cancel_scope is None:
             cancel_scope = CancellationScope(interaction_id=f"turn_{int(time.time())}")
@@ -562,7 +620,7 @@ class VoicePipeline:
 
         # Create TTS queue and playback tracker
         tts_text_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=50)
-        self._playback = PlaybackTracker(playback_timeout=4.0)
+        self._playback = PlaybackTracker(playback_timeout=30.0)
 
         tts_worker = TTSStreamWorker(sample_rate=self._settings.tts_sample_rate)
 
@@ -655,6 +713,7 @@ class VoicePipeline:
             except asyncio.TimeoutError:
                 log.warning("tts_queue_full_timeout")
 
+        result: dict = {"text": "", "tool_calls": [], "interrupted": False}
         try:
             result = await self._llm.process(
                 user_text=text,

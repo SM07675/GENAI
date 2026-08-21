@@ -507,12 +507,17 @@ class APIVisionProvider:
                     },
                 ]
 
-        response = await client.chat.completions.create(
-            model=self._settings.companion_vision_model,
-            messages=messages,
-            max_tokens=1024,
-            temperature=0.1,
-        )
+        call_kwargs: dict[str, Any] = {
+            "model": self._settings.companion_vision_model,
+            "messages": messages,
+            "max_tokens": 2048,
+            "temperature": 0.2,
+        }
+        if provider == "nvidia":
+            call_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+            call_kwargs["top_p"] = 0.95
+
+        response = await client.chat.completions.create(**call_kwargs)
         return response.choices[0].message.content or ""
 
     def _parse_response(self, raw: str) -> VisionContext:
@@ -622,6 +627,38 @@ class APIVisionProvider:
             log.warning("vision_parse_error", error=str(exc), raw_snippet=raw[:200])
             return VisionContext.error_context(f"parse_error: {exc}")
 
+    async def answer_image(
+        self,
+        image_bytes: bytes,
+        user_question: str,
+        mode: str = "general",
+        app_info: Optional[dict] = None,
+    ) -> str:
+        """Answer a user question using the actual supplied image bytes.
+
+        Unlike ambient Quick Look, failures are raised so callers cannot
+        mistake an error sentence for a successful visual observation.
+        """
+        if not self._limiter.reserve_for_quicklook():
+            raise RuntimeError("Vision requests are temporarily rate limited.")
+        app_str = (app_info or {}).get("process_name_stem", "uploaded image")
+        prompt = (
+            f"You are Genie, a concise and careful multimodal assistant.\n"
+            f"The user supplied an image ({app_str}, mode={mode}).\n"
+            f"Question: \"{user_question}\"\n\n"
+            "Inspect the image itself and answer directly. Mention exact visible text, "
+            "errors, or UI details when relevant. Never claim to see details that are not visible."
+        )
+        raw_answer = await asyncio.wait_for(
+            self._call_vision_api(image_bytes, prompt, system_prompt=""),
+            timeout=20.0,
+        )
+        self._limiter.record_call()
+        answer = raw_answer.strip()
+        if not answer:
+            raise RuntimeError("The vision model returned an empty response.")
+        return answer
+
     async def quick_look_analyze(
         self,
         image_bytes: bytes,
@@ -655,10 +692,10 @@ class APIVisionProvider:
             return raw_answer.strip()
         except asyncio.TimeoutError:
             log.warning("quick_look_api_timeout")
-            return "I looked at your screen, but the vision request timed out. Please try again."
+            return "The vision request timed out. Please try again."
         except Exception as exc:
             log.warning("quick_look_api_error", error=str(exc))
-            return "I took a look at your screen, but couldn't analyze it right now."
+            return "I couldn't analyze the image right now."
 
     @property
     def limiter(self) -> VisionCallLimiter:
@@ -713,6 +750,24 @@ class VisionService:
         if not self._settings.companion_vision_enabled:
             return VisionContext.empty()
         return await self._provider.analyze(image_bytes, mode=mode, app_info=app_info)
+
+    async def answer_image(
+        self,
+        image_bytes: bytes,
+        user_question: str,
+        mode: str = "general",
+        app_info: Optional[dict] = None,
+    ) -> str:
+        if not self._settings.companion_vision_enabled:
+            raise RuntimeError("Image understanding is disabled in settings.")
+        if not hasattr(self._provider, "answer_image"):
+            raise RuntimeError("The configured model does not support image input.")
+        return await self._provider.answer_image(
+            image_bytes=image_bytes,
+            user_question=user_question,
+            mode=mode,
+            app_info=app_info,
+        )
 
     async def quick_look_analyze(
         self,

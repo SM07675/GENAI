@@ -46,80 +46,80 @@ const STATE_TO_EXPRESSION = {
 
 const EXPRESSION_THEME = {
   idle: {
-    primary:  '#38bdf8',   // sky blue
-    glow:     'rgba(56,189,248,0.4)',
-    face:     'linear-gradient(145deg, #0f172a 0%, #0369a1 100%)',
-    eyeColor: '#38bdf8',
+    primary:  '#2998FF',   // sky blue
+    glow:     'rgba(41,152,255,0.35)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EAF8FF 45%, #BFEAFF 100%)',
+    eyeColor: '#0B5ED7',
     bodyGrad: ['#f0f9ff', '#e0f2fe', '#bae6fd'],
   },
   sleeping: {
-    primary:  '#818cf8',   // soft indigo
-    glow:     'rgba(129,140,248,0.25)',
-    face:     'linear-gradient(145deg, #0f172a 0%, #1e1b4b 100%)',
-    eyeColor: '#a78bfa',
+    primary:  '#8B7FE8',   // soft indigo
+    glow:     'rgba(139,127,232,0.22)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #F3F1FF 50%, #DCD9FF 100%)',
+    eyeColor: '#6D5FD1',
     bodyGrad: ['#f5f3ff', '#ede9fe', '#ddd6fe'],
   },
   waking: {
-    primary:  '#38bdf8',
-    glow:     'rgba(56,189,248,0.6)',
-    face:     'linear-gradient(145deg, #0f172a 0%, #0284c7 100%)',
-    eyeColor: '#7dd3fc',
+    primary:  '#2998FF',
+    glow:     'rgba(41,152,255,0.5)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EAF8FF 40%, #9FE0FF 100%)',
+    eyeColor: '#0B5ED7',
     bodyGrad: ['#f0f9ff', '#e0f2fe', '#bae6fd'],
   },
   listening: {
-    primary:  '#22d3ee',   // cyan glow
-    glow:     'rgba(34,211,238,0.65)',
-    face:     'linear-gradient(145deg, #082f49 0%, #0284c7 100%)',
-    eyeColor: '#67e8f9',
+    primary:  '#12B8D6',   // cyan
+    glow:     'rgba(18,184,214,0.5)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #E3FBFF 40%, #8FE9FF 100%)',
+    eyeColor: '#0A7C92',
     bodyGrad: ['#ecfeff', '#cffafe', '#a5f3fc'],
   },
   thinking: {
-    primary:  '#38bdf8',   // sky blue pulse
-    glow:     'rgba(56,189,248,0.6)',
-    face:     'linear-gradient(145deg, #0c4a6e 0%, #0369a1 100%)',
-    eyeColor: '#7dd3fc',
+    primary:  '#2998FF',   // sky blue pulse
+    glow:     'rgba(41,152,255,0.5)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EAF8FF 42%, #BFEAFF 100%)',
+    eyeColor: '#0B5ED7',
     bodyGrad: ['#f0f9ff', '#e0f2fe', '#bae6fd'],
   },
   speaking: {
-    primary:  '#34d399',   // mint cyan
-    glow:     'rgba(52,211,153,0.55)',
-    face:     'linear-gradient(145deg, #064e3b 0%, #0284c7 100%)',
-    eyeColor: '#6ee7b7',
+    primary:  '#1FB988',   // mint
+    glow:     'rgba(31,185,136,0.4)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EAFFF6 40%, #9BEFD1 100%)',
+    eyeColor: '#0E8A63',
     bodyGrad: ['#ecfdf5', '#d1fae5', '#a7f3d0'],
   },
   happy: {
-    primary:  '#38bdf8',
-    glow:     'rgba(56,189,248,0.55)',
-    face:     'linear-gradient(145deg, #0f172a 0%, #0369a1 100%)',
-    eyeColor: '#7dd3fc',
+    primary:  '#2998FF',
+    glow:     'rgba(41,152,255,0.45)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EAF8FF 45%, #BFEAFF 100%)',
+    eyeColor: '#0B5ED7',
     bodyGrad: ['#f0f9ff', '#e0f2fe', '#bae6fd'],
   },
   excited: {
-    primary:  '#38bdf8',
-    glow:     'rgba(56,189,248,0.7)',
-    face:     'linear-gradient(145deg, #0369a1 0%, #0284c7 100%)',
-    eyeColor: '#bae6fd',
+    primary:  '#2998FF',
+    glow:     'rgba(41,152,255,0.6)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #DDF3FF 35%, #72D4FF 100%)',
+    eyeColor: '#0B5ED7',
     bodyGrad: ['#f0f9ff', '#e0f2fe', '#bae6fd'],
   },
   confused: {
-    primary:  '#fb7185',
-    glow:     'rgba(251,113,133,0.4)',
-    face:     'linear-gradient(145deg, #4c0519 0%, #0f172a 100%)',
-    eyeColor: '#fca5a5',
+    primary:  '#E4536B',
+    glow:     'rgba(228,83,107,0.3)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #FFF1F2 45%, #FFD3D8 100%)',
+    eyeColor: '#C23A52',
     bodyGrad: ['#fff1f2', '#ffe4e6', '#fecdd3'],
   },
   surprised: {
-    primary:  '#38bdf8',
-    glow:     'rgba(56,189,248,0.65)',
-    face:     'linear-gradient(145deg, #075985 0%, #0f172a 100%)',
-    eyeColor: '#bae6fd',
+    primary:  '#2998FF',
+    glow:     'rgba(41,152,255,0.55)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EAF8FF 38%, #BFEAFF 100%)',
+    eyeColor: '#0B5ED7',
     bodyGrad: ['#f0f9ff', '#e0f2fe', '#bae6fd'],
   },
   concerned: {
-    primary:  '#60a5fa',
-    glow:     'rgba(96,165,250,0.4)',
-    face:     'linear-gradient(145deg, #1e3a8a 0%, #0f172a 100%)',
-    eyeColor: '#93c5fd',
+    primary:  '#4C7FE0',
+    glow:     'rgba(76,127,224,0.3)',
+    face:     'linear-gradient(150deg, #FFFFFF 0%, #EFF6FF 45%, #C7DBFF 100%)',
+    eyeColor: '#2E52B8',
     bodyGrad: ['#eff6ff', '#dbeafe', '#bfdbfe'],
   },
 };
@@ -448,7 +448,7 @@ export default function GenieFace({ size = 280, showBody = true, minimal = false
             borderRadius: '50%',
             background: theme.face,
             border: `2px solid ${theme.primary}33`,
-            boxShadow: `0 0 ${size * 0.12}px ${theme.glow}, inset 0 0 ${size * 0.08}px rgba(0,0,0,0.6)`,
+            boxShadow: `0 0 ${size * 0.12}px ${theme.glow}, 0 ${size * 0.03}px ${size * 0.1}px rgba(15,43,85,0.12), inset 0 ${size * 0.025}px ${size * 0.1}px rgba(255,255,255,0.95), inset 0 -${size * 0.06}px ${size * 0.12}px ${theme.primary}22`,
             position: 'relative',
             overflow: 'hidden',
             display: 'flex',

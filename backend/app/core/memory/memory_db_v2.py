@@ -103,6 +103,40 @@ class Project:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Qdrant process-wide singleton
+# One QdrantClient per process — local file-backed Qdrant cannot be opened
+# by more than one client instance at a time.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_qdrant_singleton = None
+_qdrant_singleton_path: Optional[Path] = None
+_qdrant_singleton_lock = asyncio.Lock()
+
+
+async def _get_qdrant_client(index_path: Path):
+    """Return (or create) the process-wide Qdrant client for index_path.
+
+    If the client was already created for a different path, it is reused
+    because all MemoryDatabase instances share the same data directory.
+    A lock prevents two concurrent initializations.
+    """
+    global _qdrant_singleton, _qdrant_singleton_path
+    async with _qdrant_singleton_lock:
+        if _qdrant_singleton is not None:
+            return _qdrant_singleton
+        try:
+            from qdrant_client import QdrantClient
+            index_path.mkdir(parents=True, exist_ok=True)
+            _qdrant_singleton = QdrantClient(path=str(index_path))
+            _qdrant_singleton_path = index_path
+            log.info("qdrant_singleton_created", path=str(index_path))
+        except Exception as exc:
+            log.warning("qdrant_singleton_failed", error=str(exc))
+            _qdrant_singleton = None
+        return _qdrant_singleton
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MemoryDatabase
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -223,16 +257,17 @@ class MemoryDatabase:
         return self._conn
 
     async def _init_qdrant(self) -> None:
-        """Initialize Qdrant in-process for vector search."""
+        """Initialize Qdrant in-process for vector search (singleton-safe)."""
         try:
-            from qdrant_client import QdrantClient
             from qdrant_client.http.models import Distance, VectorParams
 
             emb = get_embedding_service()
             await emb.initialize()
             dim = emb.dimension
 
-            self._qdrant = QdrantClient(path=str(self._db_path.parent / "qdrant_index"))
+            self._qdrant = await _get_qdrant_client(self._db_path.parent / "qdrant_index")
+            if self._qdrant is None:
+                return  # singleton creation failed — already logged
 
             exists = await asyncio.to_thread(
                 lambda: self._qdrant.collection_exists(self._collection)
@@ -249,6 +284,7 @@ class MemoryDatabase:
             log.warning("qdrant_not_installed", msg="Semantic search unavailable")
         except Exception as exc:
             log.warning("qdrant_init_failed", error=str(exc))
+
 
     # ── Memory CRUD ────────────────────────────────────────────────────────
 
@@ -382,22 +418,33 @@ class MemoryDatabase:
                         if len(memories) >= limit:
                             break
 
+            if not memories:
+                # Fallback to keyword search if vector search found nothing
+                return await self._keyword_search(query, category, project_id, limit, min_importance)
+
             return memories
         except Exception as exc:
             log.warning("semantic_search_failed", error=str(exc))
             return await self._keyword_search(query, category, project_id, limit, min_importance)
 
     async def _keyword_search(self, query: str, category, project_id, limit, min_importance) -> List[Memory]:
-        """Fallback keyword search when embeddings unavailable."""
+        """Fallback tokenized keyword search."""
+        import re
+
         def _search():
             conn = self._get_conn()
-            sql = """
+            words = [w for w in re.findall(r"\w+", query) if len(w) >= 2]
+            if not words:
+                words = [query.strip()] if query.strip() else [""]
+
+            clauses = ["content LIKE ?" for _ in words]
+            sql = f"""
                 SELECT * FROM memories
-                WHERE content LIKE ?
+                WHERE ({" OR ".join(clauses)})
                   AND importance >= ?
                   AND (expires_at IS NULL OR expires_at > ?)
             """
-            params: List[Any] = [f"%{query}%", min_importance, time.time()]
+            params: List[Any] = [f"%{w}%" for w in words] + [min_importance, time.time()]
             if category:
                 sql += " AND category = ?"
                 params.append(category)
@@ -468,6 +515,94 @@ class MemoryDatabase:
         count = await asyncio.to_thread(_delete)
         if count > 0:
             log.info("memory_expired_deleted", count=count)
+        return count
+
+    async def delete_memory(self, mem_id: str) -> bool:
+        """Delete a single memory by ID. Removes from SQLite and Qdrant."""
+        def _delete():
+            conn = self._get_conn()
+            cur = conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+        success = await asyncio.to_thread(_delete)
+        if success and self._qdrant is not None:
+            try:
+                await asyncio.to_thread(
+                    lambda: self._qdrant.delete(
+                        collection_name=self._collection,
+                        points_selector=[mem_id],
+                    )
+                )
+            except Exception as exc:
+                log.debug("qdrant_delete_point_failed", error=str(exc))
+        return success
+
+    async def delete_matching(self, query: str) -> int:
+        """Delete memories matching a query pattern (for 'forget that' requests)."""
+        matching = await self.search(query=query, limit=10)
+        deleted_count = 0
+        for mem in matching:
+            if await self.delete_memory(mem.id):
+                deleted_count += 1
+        return deleted_count
+
+    async def update_memory(self, mem_id: str, content: str, importance: Optional[float] = None) -> bool:
+        """Update the content and optionally importance of an existing memory."""
+        def _update():
+            conn = self._get_conn()
+            if importance is not None:
+                cur = conn.execute(
+                    "UPDATE memories SET content = ?, importance = ?, last_accessed_at = ? WHERE id = ?",
+                    (content, importance, time.time(), mem_id),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE memories SET content = ?, last_accessed_at = ? WHERE id = ?",
+                    (content, time.time(), mem_id),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+
+        success = await asyncio.to_thread(_update)
+        # Update vector embedding if possible
+        if success and self._qdrant is not None:
+            try:
+                emb = get_embedding_service()
+                vector = await emb.embed_text(content)
+                from qdrant_client.http.models import PointStruct
+                await asyncio.to_thread(
+                    lambda: self._qdrant.upsert(
+                        collection_name=self._collection,
+                        points=[PointStruct(id=mem_id, vector=vector, payload={"content": content})],
+                    )
+                )
+            except Exception as exc:
+                log.debug("qdrant_update_point_failed", error=str(exc))
+        return success
+
+    async def clear_all(self) -> int:
+        """Clear all memories and preferences for privacy reset."""
+        def _clear():
+            conn = self._get_conn()
+            cur = conn.execute("DELETE FROM memories")
+            conn.execute("DELETE FROM preferences")
+            conn.commit()
+            return cur.rowcount
+
+        count = await asyncio.to_thread(_clear)
+        if self._qdrant is not None:
+            try:
+                from qdrant_client.http.models import Filter
+                await asyncio.to_thread(
+                    lambda: self._qdrant.delete(
+                        collection_name=self._collection,
+                        points_selector=Filter(),
+                    )
+                )
+            except Exception:
+                pass
+        log.info("memory_cleared_all", count=count)
         return count
 
     # ── Preferences ────────────────────────────────────────────────────────

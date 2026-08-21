@@ -8,9 +8,12 @@ Per spec §17:
 """
 import sys
 import os
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 block_cipher = None
+base_dir = os.path.abspath(SPECPATH)
+if base_dir not in sys.path:
+    sys.path.insert(0, base_dir)
 
 hidden_imports = [
     "uvicorn.logging",
@@ -40,20 +43,28 @@ hidden_imports = [
     "structlog",
     "pydantic",
     "pydantic_settings",
+    "vosk",
+    "vosk.vosk_cffi",
 ]
 
 # Add submodules for complex AI packages
 hidden_imports += collect_submodules("app")
 hidden_imports += collect_submodules("litellm")
 
+binaries = collect_dynamic_libs("vosk")
+
 datas = [
-    ("app/prompts", "app/prompts"),
+    (os.path.join(base_dir, "app", "prompts"), "app/prompts"),
+    (
+        os.path.join(base_dir, "vosk-model-small-en-us-0.15"),
+        "vosk-model-small-en-us-0.15",
+    ),
 ]
 
 a = Analysis(
-    ["run_backend.py"],
-    pathex=["."],
-    binaries=[],
+    [os.path.join(base_dir, "run_backend.py")],
+    pathex=[base_dir],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],

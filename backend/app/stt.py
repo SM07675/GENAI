@@ -148,13 +148,42 @@ def transcribe_fw(audio_bytes: bytes, settings: Settings) -> str:
                 compression_ratio_threshold=2.4,
                 log_prob_threshold=-1.0,
             )
-            result = "".join(seg.text for seg in segments).strip()
+            # Get raw segments list and info — evaluate language confidence
+            segments_list = list(segments)
+            result = "".join(seg.text for seg in segments_list).strip()
+
+            # Language confidence enforcement: if Whisper's auto-detection is below
+            # the confidence threshold, fall back to the user's preferred language.
+            # This prevents English audio from being mis-labelled as Hindi (etc.)
+            # with low confidence (~0.57) which can corrupt the transcript meaning.
+            LANG_CONFIDENCE_THRESHOLD = 0.75
+            detected_lang = getattr(_info, "language", None) or "en"
+            lang_prob = getattr(_info, "language_probability", 1.0)
+
+            preferred_lang = (settings.stt_language or "").strip().lower() or "en"
+
+            if lang_prob < LANG_CONFIDENCE_THRESHOLD and detected_lang != preferred_lang:
+                log.info(
+                    "stt_language_detection_low_confidence",
+                    detected=detected_lang,
+                    probability=round(lang_prob, 3),
+                    overriding_to=preferred_lang,
+                )
+                detected_lang = preferred_lang
+
+            log.info(
+                "stt_transcribed",
+                text=result[:200],
+                language=detected_lang,
+                language_probability=round(lang_prob, 3),
+            )
+
         except Exception as exc:
             log.warning("stt_transcribe_cuda_failed_trying_cpu", error=str(exc))
             from faster_whisper import WhisperModel
             cpu_model = WhisperModel(settings.whisper_model_size, device="cpu", compute_type="int8")
-            segments, _info = cpu_model.transcribe(audio_array, beam_size=3)
-            result = "".join(seg.text for seg in segments).strip()
+            segments2, _info2 = cpu_model.transcribe(audio_array, beam_size=3)
+            result = "".join(seg.text for seg in segments2).strip()
 
         # Post-filter: reject common hallucination artifacts from silence
         _HALLUCINATIONS = {
